@@ -14,5 +14,7 @@ All notable changes to this project are documented in this file.
   emitting a faithful and an optimised form.
 - `scripts/gen_layer_props.py`: extends the PDK layer properties with the
   layers a puzzle GDS adds.
+- `make cc`, elaborating common_cells modules through sv2v onto the same gate
+  basis a recovered netlist uses, parameterised in place with no wrappers.
 - `gds/` input directory, populated by `make gds` from a `name:path` list so
   new dependencies contribute layouts with a single line.

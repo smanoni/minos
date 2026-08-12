@@ -1,0 +1,19 @@
+# Copyright 2026 Simone Manoni.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Simone Manoni <simone.manoni2@gmail.com>
+
+read_verilog -defer IN_V
+hierarchy TOPSPEC
+proc
+flatten
+opt -full
+techmap
+opt -full
+dffunmap
+abc -g AND,OR,XOR,MUX
+opt_clean
+tee -a LOG stat
+write_verilog -noattr OUT_V
+write_json OUT_JSON

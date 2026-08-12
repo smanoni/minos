@@ -10,5 +10,6 @@ GDS to RTL with open tools.
 | `scripts/def2v.py` | DEF to gate-level Verilog |
 | `scripts/generic.ys` | PDK netlist to technology-independent gates |
 | `scripts/gen_layer_props.py` | KLayout layer properties |
+| `scripts/cc_lib.ys` | common_cells reference to the same gate basis |
 | `gds/` | input layouts, populated by `make gds` |
 | `work/` | generated output |

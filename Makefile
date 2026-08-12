@@ -29,6 +29,21 @@ LIBERTY   := $(STDCELLS)/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
 MODELS    := $(STDCELLS)/verilog/primitives.v $(STDCELLS)/verilog/sky130_fd_sc_hd.v
 SIMFLAGS  := -g2012 -DFUNCTIONAL -DUNIT_DELAY=\#1
 
+# Reference modules to recognise in a recovered netlist, as module:param=value
+# pairs taken straight from common_cells. `make cc` elaborates each onto the
+# same gate basis the recovered netlists use. Add a reference by appending one
+# entry; parameters left out keep their default.
+SV2V      ?= sv2v
+CC        := $(DEPS)/common_cells
+SV2VFLAGS := -DSYNTHESIS -DASSERTS_OFF -I$(CC)/include
+
+CC_MODULES ?= cc_gray_to_binary:Width=8 \
+              cc_binary_to_gray:Width=8 \
+              cc_popcount:InputWidth=8 \
+              cc_counter:Width=8 \
+              cc_shift_register:Depth=8 \
+              cc_lfsr_8bit:Width=8
+
 PDK_TAG   := sky130-ff08c23db8359afce3f134c454e7930586d0641c
 PDK_URL   := https://github.com/fossi-foundation/ciel-releases/releases/download/$(PDK_TAG)
 PDK_PARTS := common sky130_fd_pr sky130_fd_pr_reram sky130_fd_io sky130_ml_xx_hd \
@@ -81,6 +96,30 @@ generic:
 	    -e 's|OUT_GENERIC_V|$(WORKDIR)/$(DESIGN)_generic.v|' \
 	    $(SCRIPTS)/generic.ys > $(WORKDIR)/$(DESIGN)_generic.ys
 	$(YOSYS) -q -s $(WORKDIR)/$(DESIGN)_generic.ys
+
+.PHONY: cc
+cc: $(WORKDIR)/common_cells.v
+	@mkdir -p $(WORKDIR)/lib
+	@for spec in $(CC_MODULES); do \
+		mod=$${spec%%:*}; name=$$mod; chparam=""; \
+		if [ "$$spec" != "$$mod" ]; then \
+			for p in $$(echo $${spec#*:} | tr ',' ' '); do \
+				chparam="$$chparam -chparam $${p%%=*} $${p#*=}"; \
+				name="$${name}_$${p%%=*}$${p#*=}"; \
+			done; \
+		fi; \
+		sed -e "s|IN_V|$(WORKDIR)/common_cells.v|" \
+		    -e "s|TOPSPEC|-top $$mod$$chparam|" \
+		    -e "s|LOG|$(WORKDIR)/lib/$$name.log|" \
+		    -e "s|OUT_JSON|$(WORKDIR)/lib/$$name.json|" \
+		    -e "s|OUT_V|$(WORKDIR)/lib/$$name.v|" \
+		    $(SCRIPTS)/cc_lib.ys > $(WORKDIR)/lib/$$name.ys; \
+		$(YOSYS) -q -s $(WORKDIR)/lib/$$name.ys || exit 1; \
+		echo "  $$name"; \
+	done
+
+$(WORKDIR)/common_cells.v: | $(WORKDIR)
+	$(SV2V) $(SV2VFLAGS) $(CC)/src/*.sv > $@ 2> $(WORKDIR)/common_cells_sv2v.log
 
 check: warmup
 
