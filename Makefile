@@ -76,6 +76,7 @@ warmup: gds | $(WORKDIR)
 	$(PYTHON) $(SCRIPTS)/def2v.py $(WORKDIR)/warmup.def $(WORKDIR)/warmup.v \
 		$(PUZZLE)/warmup/01_netlist.v
 	$(MAKE) generic DESIGN=warmup TOP=adder_demo
+	$(MAKE) structure DESIGN=warmup
 
 .PHONY: puzzle
 puzzle: gds | $(WORKDIR)
@@ -83,6 +84,7 @@ puzzle: gds | $(WORKDIR)
 		$(WORKDIR)/puzzle.def
 	$(PYTHON) $(SCRIPTS)/def2v.py $(WORKDIR)/puzzle.def $(WORKDIR)/puzzle.v
 	$(MAKE) generic DESIGN=puzzle TOP=puzzle
+	$(MAKE) structure DESIGN=puzzle
 
 .PHONY: generic
 generic:
@@ -96,6 +98,11 @@ generic:
 	    -e 's|OUT_GENERIC_V|$(WORKDIR)/$(DESIGN)_generic.v|' \
 	    $(SCRIPTS)/generic.ys > $(WORKDIR)/$(DESIGN)_generic.ys
 	$(YOSYS) -q -s $(WORKDIR)/$(DESIGN)_generic.ys
+
+.PHONY: structure
+structure:
+	$(PYTHON) $(SCRIPTS)/structure.py \
+		$(WORKDIR)/$(DESIGN)_generic.json $(WORKDIR)/$(DESIGN)_regions.json
 
 .PHONY: cc
 cc: $(WORKDIR)/common_cells.v

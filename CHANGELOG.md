@@ -14,6 +14,8 @@ All notable changes to this project are documented in this file.
   emitting a faithful and an optimised form.
 - `scripts/gen_layer_props.py`: extends the PDK layer properties with the
   layers a puzzle GDS adds.
+- `scripts/structure.py`: recovers register groups, shift-register chains and
+  output cones from a netlist, independently of the gate basis.
 - `make cc`, elaborating common_cells modules through sv2v onto the same gate
   basis a recovered netlist uses, parameterised in place with no wrappers.
 - `gds/` input directory, populated by `make gds` from a `name:path` list so
