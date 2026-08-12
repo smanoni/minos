@@ -1,0 +1,6 @@
+[submodule "deps/asic-puzzle-2026"]
+	path = deps/asic-puzzle-2026
+	url = https://github.com/janestreet/asic-puzzle-2026.git
+[submodule "deps/common_cells"]
+	path = deps/common_cells
+	url = https://github.com/pulp-platform/common_cells.git

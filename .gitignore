@@ -1,0 +1,12 @@
+__pycache__
+scripts/__pycache__
+work
+pdk
+klayout
+*.vvp
+abc.history
+.venv
+gds/*
+!gds/.gitkeep
+docs
+test
