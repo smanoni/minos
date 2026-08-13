@@ -99,6 +99,26 @@ def control(cells, ports, driver, flop):
     return tuple(out)
 
 
+def cone_cells(cells, driver, ports, flops):
+    """Combinational cells feeding these registers, stopping at any register"""
+    inside, seen, queue = set(), set(), []
+    for f in flops:
+        queue += [b for p, bits in cells[f]["connections"].items() for b in bits
+                  if cells[f]["port_directions"].get(p) == "input"]
+    while queue:
+        bit = queue.pop()
+        if bit in seen:
+            continue
+        seen.add(bit)
+        src = driver.get(bit)
+        if src is None or is_flop(cells, src) or src in inside:
+            continue
+        inside.add(src)
+        queue += [b for p, bits in cells[src]["connections"].items() for b in bits
+                  if cells[src]["port_directions"].get(p) == "input"]
+    return sorted(inside)
+
+
 def chains(cells, driver, ports):
     """Registers whose data comes from exactly one other register"""
     flops = [n for n in cells if is_flop(cells, n)]
@@ -124,13 +144,26 @@ def chains(cells, driver, ports):
 
 def cones(cells, driver, ports):
     """Combinational logic behind each output port"""
-    outs = collections.defaultdict(lambda: (set(), set()))
+    outs = {}
     for bit, name in ports.items():
         src = driver.get(bit)
         if src is None or is_flop(cells, src):
             continue
         srcs, inputs = support(cells, driver, ports, src)
-        outs[name] = (srcs, inputs)
+        inside, seen, queue = {src}, set(), [bit]
+        while queue:
+            b = queue.pop()
+            if b in seen:
+                continue
+            seen.add(b)
+            cell = driver.get(b)
+            if cell is None or is_flop(cells, cell):
+                continue
+            inside.add(cell)
+            queue += [x for p, bits in cells[cell]["connections"].items()
+                      for x in bits
+                      if cells[cell]["port_directions"].get(p) == "input"]
+        outs[name] = (srcs, inputs, sorted(inside))
     return outs
 
 
@@ -154,13 +187,16 @@ def main(path, out=None):
             continue
         print("    %2d deep, serial input from %s"
               % (len(chain), ", ".join(inputs) or "logic"))
+        logic = cone_cells(cells, driver, ports, chain)
         regions.append({"kind": "chain", "depth": len(chain),
-                        "cells": chain, "inputs": inputs})
+                        "cells": chain + logic, "registers": chain,
+                        "inputs": inputs})
 
     print("  output cones:")
-    for name, (srcs, inputs) in sorted(cones(cells, driver, ports).items()):
-        print("    %-12s %d registers, %d ports" % (name, len(srcs), len(inputs)))
-        regions.append({"kind": "cone", "output": name,
+    for name, (srcs, inputs, inside) in sorted(cones(cells, driver, ports).items()):
+        print("    %-12s %d registers, %d ports, %d cells"
+              % (name, len(srcs), len(inputs), len(inside)))
+        regions.append({"kind": "cone", "output": name, "cells": inside,
                         "registers": sorted(srcs), "inputs": sorted(inputs)})
 
     if out:
