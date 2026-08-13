@@ -19,7 +19,6 @@ CUT = [("mcon", 67, 44), ("via", 68, 44), ("via2", 69, 44),
        ("via3", 70, 44), ("via4", 71, 44)]
 LABEL = [(n, l, 5) for n, l, _ in COND]
 SUPPLY = ("VPWR", "VGND", "VPB", "VNB")
-PORT_LABEL = (70, 5)
 BOUNDARY = (235, 4)
 
 ORIENT = {(0, False): "N", (90, False): "W", (180, False): "S", (270, False): "E",
@@ -196,8 +195,8 @@ def main(gds, pdk, out, ref=None):
     comps = components(circuit, ly, lef)
     nts, orphans = nets(circuit, comps, lef)
 
-    labels = {t.text.string for t in
-              ly.top_cell().shapes(ly.layer(*PORT_LABEL)).each(db.Shapes.STexts)}
+    labels = {s.text.string for _, l, d in LABEL
+              for s in ly.top_cell().shapes(ly.layer(l, d)).each(db.Shapes.STexts)}
     ports = {n: (n, "OUTPUT" if "OUTPUT" in nts[n][1] else "INPUT")
              for n in labels if n in nts and n not in SUPPLY}
 

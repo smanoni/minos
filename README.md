@@ -11,6 +11,10 @@ GDS to RTL with open tools.
 | `scripts/generic.ys` | PDK netlist to technology-independent gates |
 | `scripts/gen_layer_props.py` | KLayout layer properties |
 | `scripts/structure.py` | candidate regions in a recovered netlist |
+| `scripts/match.py` | proves a region equivalent to a reference |
 | `scripts/cc_lib.ys` | common_cells reference to the same gate basis |
-| `gds/` | input layouts, populated by `make gds` |
+| `scripts/lift.py` | behavioural RTL for a region, kept only if proven |
+| `scripts/emit.py` | rebuilds the hierarchy synthesis flattened |
+| `gds/` | input layouts, populated by `make deps` |
+| `gds.lock` | checksums pinning the downloaded layouts |
 | `work/` | generated output |
