@@ -81,20 +81,28 @@ def main(netlist, regions_path, outdir, out, shared="minos_shift_register"):
         if not got:
             continue
         path, name = got
-        roles[index] = match.roles(path, name, region["registers"])
+        wiring = match.region_wiring(match.roles(path, name,
+                                                 region["registers"]))
+        if wiring is None:
+            continue
+        roles[index] = wiring
         keep.append((index, region))
+    if not keep:
+        print("no regions to instantiate")
+        return 1
 
     proven = [keep[0]]
     base, bpath = keep[0][0], "%s/minos_region_%d.json" % (workdir, keep[0][0])
-    bc, bw = match.region_wiring(roles[base])
-    match.canonicalise(bpath, "minos_region_%d" % base, bc, bw, "gold", workdir)
+    bc, bw, bd, _ = roles[base]
+    match.canonicalise(bpath, "minos_region_%d" % base, bc, bw, "gold",
+                       workdir, bd)
     for index, region in keep[1:]:
         path = "%s/minos_region_%d.json" % (workdir, index)
-        conn, width = match.region_wiring(roles[index])
+        conn, width, dwidth, _ = roles[index]
         if width != bw:
             continue
         if not match.canonicalise(path, "minos_region_%d" % index, conn, width,
-                                  "gate", workdir):
+                                  "gate", workdir, dwidth):
             continue
         verdict = match.prove("%s/gold.json" % workdir, "%s/gate.json" % workdir,
                               workdir, "emit_prove_%d" % index)

@@ -179,11 +179,22 @@ corpus: deps
 		$(MAKE) --no-print-directory run DESIGN=$$p || rc=1; \
 	done; exit $$rc
 
+# Recovered RTL is meant to be read and simulated, and a proof reads it
+# through yosys alone, so it is compiled as well before it counts as done.
+# The proof also has no model of a clock net, which leaves the edge a design
+# runs on unchecked by it; simulating the recovered RTL beside the netlist
+# closes that, so it is run wherever there is a simulator to run it with.
 .PHONY: lift
 lift:
 	YOSYS="$(YOSYS)" $(PYTHON) $(SCRIPTS)/lift.py \
 		$(WORKDIR)/$(DESIGN)_generic.json $(WORKDIR)/$(DESIGN)_regions.json \
 		$(WORKDIR) $(WORKDIR)/$(DESIGN)_lifted.sv
+	@command -v $(firstword $(IVERILOG)) >/dev/null || exit 0; \
+	$(IVERILOG) -g2012 -o /dev/null $(WORKDIR)/$(DESIGN)_lifted.sv
+	@command -v $(firstword $(VVP)) >/dev/null || exit 0; \
+	YOSYS="$(YOSYS)" IVERILOG="$(IVERILOG)" VVP="$(VVP)" \
+		$(PYTHON) $(SCRIPTS)/cosim.py $(WORKDIR)/$(DESIGN)_generic.json \
+		$(WORKDIR)/$(DESIGN)_lifted.sv $(WORKDIR)
 
 .PHONY: emit
 emit:
