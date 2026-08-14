@@ -33,6 +33,11 @@ All notable changes to this project are documented in this file.
 - A loadable shift register template, matched from the mux each stage uses to
   choose between its neighbour and a value of its own, and extracted with
   those muxes alone so the shifted-in bit stays a port of the region.
+- A state group is the largest set of registers closed under itself, rather
+  than a whole control group that happens to be closed. One register watching
+  something outside the group used to hide the state machine the rest of them
+  form, which is why the puzzle came back with no state group at all and now
+  comes back with eighty registers.
 - Synchronous reset, recognised rather than pattern-matched: a net is a reset
   when holding it settles every register's data pin at once, whatever the rest
   of the design is doing, and the word it settles them to is the value the
@@ -59,6 +64,8 @@ All notable changes to this project are documented in this file.
   refused instead.
 - A lifted block and the gates carried over beside it no longer declare the
   same net twice.
+- An output driven by a register no template claimed is left to the register,
+  which already carries the output's name, instead of being wired to itself.
 - Templates take their clock edge, reset polarity and reset value from the
   registers they speak for instead of assuming a rising edge and a zero. The
   proof has no model of a clock net and so could never have caught the

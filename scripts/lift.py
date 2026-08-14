@@ -1251,11 +1251,11 @@ def leftover(netlist, regions, chains, states, banks, cones, paths, names, lines
             continue
         for i, bit in enumerate(spec["bits"]):
             one = name if len(spec["bits"]) == 1 else "%s[%d]" % (name, i)
-            if one not in driven:
-                tail.append("  assign %s = %s;"
-                            % (one, alias.get(bit,
-                                              label.get(bit,
-                                                        expr.net_name(bit)))))
+            source = alias.get(bit, label.get(bit, expr.net_name(bit)))
+            # A register carried over already took the output's own name, so
+            # wiring it up again would assign the port to itself.
+            if one not in driven and source != one:
+                tail.append("  assign %s = %s;" % (one, source))
     return [""] + wires + [""] + assigns + always + tail
 
 

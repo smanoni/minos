@@ -184,29 +184,33 @@ def banks(cells, driver, ports, claimed=()):
 
 
 def state_groups(cells, driver, ports):
-    """Registers whose next value depends only on registers of their own group.
+    """The largest set of registers whose next value depends only on the set.
 
-    A counter, an LFSR and a toggle all look like this: the group is a state
-    machine closed under itself. How many of the group a register depends on
-    also orders them, since in a counter bit k is the one that watches k of
-    its neighbours.
+    A counter, an LFSR and a toggle all look like this: a group closed under
+    itself. Asking a whole control group to be closed finds nothing as soon
+    as a design keeps one register that watches something else, so the group
+    is narrowed until what is left holds. That is the state machine with its
+    stragglers dropped rather than nothing at all. How many of the group a
+    register depends on also orders them, since in a counter bit k is the one
+    that watches k of its neighbours.
     """
-    groups = collections.defaultdict(list)
+    groups, support = collections.defaultdict(list), {}
     for name in cells:
         if is_flop(cells, name):
             groups[control(cells, ports, driver, name)].append(name)
+            support[name] = data_support(cells, driver, ports, name)[0]
     out = {}
     for ctrl, group in groups.items():
-        members = set(group)
-        weight = {}
-        for flop in group:
-            srcs, _ = data_support(cells, driver, ports, flop)
-            if not srcs or not srcs <= members:
-                weight = None
+        keep = set(group)
+        while True:
+            drop = {f for f in keep
+                    if not support[f] or not support[f] <= keep}
+            if not drop:
                 break
-            weight[flop] = len(srcs & members)
-        if weight:
-            out[ctrl] = sorted(group, key=lambda f: (weight[f], f))
+            keep -= drop
+        if keep:
+            weight = {f: len(support[f] & keep) for f in keep}
+            out[ctrl] = sorted(keep, key=lambda f: (weight[f], f))
     return out
 
 
