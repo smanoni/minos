@@ -918,6 +918,18 @@ def slice_of(bits):
     return "{%s}" % ", ".join(reversed(bits))
 
 
+def numbered(role, letter):
+    """Whether a role is one of a numbered family, and not merely spelt like it.
+
+    The families are written a letter and an index, which a prefix alone does
+    not tell apart from a role whose name happens to start with that letter:
+    clk reads as the first of the c family and was being asked to name a
+    control net, so every region clocked by anything but the top module's own
+    clock port was refused after it had already proved.
+    """
+    return role[:1] == letter and role[1:].isdigit()
+
+
 def bit_names(ports, direction):
     """Every port bit of a direction, under the name a split net carries"""
     out = {}
@@ -934,7 +946,7 @@ def output_wiring(ports, chains, names):
     driven, lines = {}, []
     for slot, (index, info) in enumerate(sorted(chains.items())):
         for role, port in info["roles"].items():
-            if role.startswith("q"):
+            if numbered(role, "q"):
                 driven[port] = "%s[%s]" % (names[index], role[1:])
     inputs = {bit: name for name, bit in bit_names(ports, "input").items()}
     for name, bit in sorted(bit_names(ports, "output").items()):
@@ -1107,6 +1119,31 @@ def resolve(module, ports, chains, states, banks, names):
     return out
 
 
+def top_bit(module, ports, name):
+    """The net bit a region's port name stands for in the top module.
+
+    A region is cut from a copy whose nets have been split to single bits, so
+    its port carries either a name the top module already has or that name
+    with an index after it. Only the bit behind the name is common to the two,
+    and the name alone cannot be carried across: the recovered RTL calls a net
+    after its number, so a region port called n20 is not the n20 that gets
+    written out, and passing the spelling through would quietly join two
+    different nets.
+    """
+    nets = module.get("netnames", {})
+    for table in (ports, nets):
+        if name in table and len(table[name]["bits"]) == 1:
+            return table[name]["bits"][0]
+    got = re.match(r"^(.*)\[(\d+)\]$", name or "")
+    if not got:
+        return None
+    base, i = got.group(1), int(got.group(2))
+    for table in (ports, nets):
+        if base in table and i < len(table[base]["bits"]):
+            return table[base]["bits"][i]
+    return None
+
+
 def role_nets(module, info, alias, ports, kind, drivers):
     """A lifted region's roles as they are named in the top module.
 
@@ -1126,17 +1163,21 @@ def role_nets(module, info, alias, ports, kind, drivers):
         if "R" not in pins:
             return None
         conn["rst"] = named(pins["R"][0])
-    nets = module.get("netnames", {})
 
     def resolve_port(role):
-        """A role's net, but only where the top module names it too.
+        """A role's net under the name the recovered RTL gives it.
 
-        Region port names come from a copy whose nets have been split, so a
-        name that is not a port of the top module cannot be matched back to
-        it safely; the region is left as gates instead of guessed at.
+        A port of the top module keeps its own name; anything else is matched
+        back to the bit it stands for and named from that, so a role driven by
+        internal logic can be written out instead of costing the region a lift
+        it had already proved. The region is still left as gates when the name
+        answers to no net at all.
         """
         got = info["roles"].get(role)
-        return got if got in ports else None
+        if got in ports:
+            return got
+        bit = top_bit(module, ports, got)
+        return None if bit is None else named(bit)
 
     if clear and not clear[3]:
         conn["sr"] = resolve_port("sr")
@@ -1147,15 +1188,11 @@ def role_nets(module, info, alias, ports, kind, drivers):
         if conn["en"] is None:
             return None
     if kind == "state":
-        nets = module.get("netnames", {})
-        for role, port in info["roles"].items():
-            if not role.startswith("c"):
+        for role in info["roles"]:
+            if not numbered(role, "c"):
                 continue
-            if port in ports:
-                conn[role] = port
-            elif port in nets:
-                conn[role] = named(nets[port]["bits"][0])
-            else:
+            conn[role] = resolve_port(role)
+            if conn[role] is None:
                 return None
         return conn
     if kind == "chain":

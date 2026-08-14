@@ -46,6 +46,24 @@ All notable changes to this project are documented in this file.
   its registers leaves the reset gates outside, so it is offered a wider cut
   that takes in the gates the reset settles, and falls back to the plain cut
   when the wider one will not take roles.
+- Gates are folded into whoever reads them. A net one gate reads is written
+  where it is read rather than on a line of its own, so what comes out is an
+  expression per register instead of a line per gate, and a design shows its
+  shape: a register holding, stepping and loading on three control lines reads
+  as one term where it used to be spread over a dozen. Brackets are placed
+  from how tightly each form binds, counted on the operator an operand belongs
+  to rather than on the brackets a form already carries. Across the corpus this
+  is half the lines and a third of the assignments, with nothing else changed.
+  A net read twice keeps a wire, since folding it would write the same term
+  out twice over and lose that the two are one net.
+- A register clocked from anywhere but a port keeps its data on a wire. Such a
+  clock is built by the design out of its own state, so it arrives a moment
+  after that state moved rather than once everything has settled, and then it
+  matters whether a value is read off a wire or worked out again in place. The
+  netlist being compared against reads every register's data off a wire, and a
+  counter on a divided clock came back differing in most of its cycles until
+  this one did too. No proof can see the difference, which is what simulating
+  the recovered RTL is there for.
 - `scripts/cosim.py`: simulates the recovered RTL beside the netlist it was
   lifted from, driving both from one clock and one stimulus. It says how often
   the netlist's own outputs moved, so a design that sat still is reported as
@@ -82,6 +100,19 @@ All notable changes to this project are documented in this file.
   a chain is read from outside it, so the region came out with fewer outputs
   than registers and the template was compared against bits nothing drove; a
   chain whose stages do not all reach an output is now refused outright.
+- A region proved and then thrown away is kept. Control roles are written a
+  letter and an index, and the letter alone does not tell one from a role that
+  merely starts the same way: clk read as the first of the c family and was
+  asked to name a control net, so every region clocked by anything but the
+  module's own clock port was refused after it had already proved. A ripple
+  counter came back with one of its eight stages recovered and now comes back
+  with all eight.
+- A role driven by internal logic is named instead of costing the region a
+  lift it had already proved. The name a region gives its port belongs to a
+  copy whose nets have been split, and the two modules number their nets
+  differently, so the name cannot be carried across as it stands: a region
+  port called n20 is not the n20 that gets written out. It is matched back to
+  the bit behind it and named from that.
 - A chain can be cut to the cells carrying one stage to the next, leaving what
   computes its serial input outside. Cut around everything feeding it, that
   logic arrives as several ports of its own and the region has more inputs
