@@ -22,21 +22,35 @@ CYCLES = int(os.environ.get("MINOS_CYCLES", "2000"))
 SEED = int(os.environ.get("MINOS_SEED", "1"))
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
-DECL = re.compile(r"^\s*reg\s+(?:\[(\d+):0\]\s*)?([A-Za-z_][A-Za-z0-9_$]*)\s*;",
-                  re.M)
+# A name Verilog cannot spell plainly is written with a backslash and closed by
+# a space, and a netlist written back out is full of them: uo_out_reg[0] is one
+# name and not an index into anything. They are kept, since a register left out
+# here is a register left unstarted, holding no value and agreeing with nothing.
+DECL = re.compile(r"^\s*reg\s+(?:\[(\d+):0\]\s*)?"
+                  r"(\\\S+|[A-Za-z_][A-Za-z0-9_$]*)\s*;", re.M)
+ANY_DECL = re.compile(r"^\s*reg\s[^;]*;", re.M)
 
 
 def registers(lifted):
-    """Every register the recovered RTL declares, with how wide it is.
+    """Every register a module declares, with how wide it is.
 
-    Read off the recovered text rather than the netlist, because these are the
-    names a testbench can reach into, and the two number their nets
-    differently. What they are for is saying how much of the design a run
-    actually stirred: agreeing on the ports says little when most of the state
-    behind them never moved.
+    Read off the text rather than the netlist, because these are the names a
+    testbench can reach into, and the two number their nets differently. What
+    they are for is saying how much of the design a run actually stirred, and
+    starting both modules from the same value: agreeing on the ports says
+    little when most of the state behind them never moved.
+
+    A register whose name cannot be written plainly comes back as None rather
+    than being passed over. Verilog lets a name be escaped, and a netlist
+    written back out carries names like \\U1776.IQ that no testbench can reach
+    into; skipping those quietly leaves a module unstarted and holding no
+    value, which then disagrees with everything and reads as a design that
+    differs rather than as a run that never began.
     """
-    return [(name, int(width) + 1 if width else 1)
-            for width, name in DECL.findall(open(lifted).read())]
+    text = open(lifted).read()
+    got = [(name, int(width) + 1 if width else 1)
+           for width, name in DECL.findall(text)]
+    return got if len(got) == len(ANY_DECL.findall(text)) else None
 
 
 def pin_bits(module, pin):
@@ -238,6 +252,12 @@ def main(netlist, lifted, outdir):
     # A design whose outputs never moved has been compared against nothing,
     # so it is given a longer run before that is what gets reported.
     held, start = registers(lifted), registers(path)
+    if held is None or start is None:
+        which = "recovered RTL" if held is None else "netlist"
+        print("  cannot start the %s: it names a register no testbench can "
+              "reach, so a run would compare against a module holding "
+              "nothing" % which)
+        return 1
     for cycles in (CYCLES, CYCLES * 10):
         out_text = simulate(path, lifted, workdir,
                             bench(top, clk, rst, data, out, level, cycles,

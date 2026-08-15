@@ -207,6 +207,13 @@ All notable changes to this project are documented in this file.
   names this pass gives were being counted as names to number around, so a
   second run turned flags0 into flags2; and every name is now put aside before
   any is put back, since one register can be taking the name another gives up.
+- A register whose name Verilog cannot spell plainly is started like any
+  other. A name can be written with a backslash and closed by a space, and a
+  netlist written back out is full of them: uo_out_reg[0] is one name and not
+  an index into anything. Three of an I2C controller's registers were being
+  passed over, so the netlist it was compared against ran holding no value in
+  them and the outputs they carry were never compared at all. A run that still
+  cannot start a module now says so rather than reporting what it found.
 - Giving up on a proof is no longer treated as a disproof. A module too large
   to prove in the time allowed still has to be compiled and simulated, and
   that simulation is the only evidence it has left; the puzzle proves nothing
