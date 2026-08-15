@@ -22,6 +22,21 @@ CYCLES = int(os.environ.get("MINOS_CYCLES", "2000"))
 SEED = int(os.environ.get("MINOS_SEED", "1"))
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+DECL = re.compile(r"^\s*reg\s+(?:\[(\d+):0\]\s*)?([A-Za-z_][A-Za-z0-9_$]*)\s*;",
+                  re.M)
+
+
+def registers(lifted):
+    """Every register the recovered RTL declares, with how wide it is.
+
+    Read off the recovered text rather than the netlist, because these are the
+    names a testbench can reach into, and the two number their nets
+    differently. What they are for is saying how much of the design a run
+    actually stirred: agreeing on the ports says little when most of the state
+    behind them never moved.
+    """
+    return [(name, int(width) + 1 if width else 1)
+            for width, name in DECL.findall(open(lifted).read())]
 
 
 def pin_bits(module, pin):
@@ -79,7 +94,8 @@ def span(width):
     return "" if width == 1 else "[%d:0] " % (width - 1)
 
 
-def bench(top, clk, rst, data, out, level, cycles):
+def bench(top, clk, rst, data, out, level, cycles, held=(),
+          start=()):
     """A testbench driving both modules from one clock and one stimulus.
 
     One value is driven per whole clock period, so a rising and a falling edge
@@ -101,6 +117,7 @@ def bench(top, clk, rst, data, out, level, cycles):
     lines = ["`timescale 1ns/1ps", "module tb;",
              "  integer i;",
              "  integer bad = 0;", "  integer moved = 0;",
+             "  integer stirred = 0;",
              "  reg [31:0] state = %d;" % (SEED or 1),
              "  function [31:0] draw;", "    input dummy;", "    begin",
              "      state = state ^ (state << 13);",
@@ -112,6 +129,9 @@ def bench(top, clk, rst, data, out, level, cycles):
     for name, width in out:
         lines += ["  wire %s%s_ref, %s_dut;" % (span(width), name, name),
                   "  reg %s%s_was;" % (span(width), name)]
+    for name, width in held:
+        lines += ["  reg %s%s_seen = %d'd0;" % (span(width), name, width),
+                  "  reg %s%s_last;" % (span(width), name)]
     every = clk + rst + data
     wire = lambda tag: ", ".join(
         [".%s(%s)" % (n, n) for n, _ in every]
@@ -132,8 +152,21 @@ def bench(top, clk, rst, data, out, level, cycles):
                   "      if (%s_ref !== %s_was) moved = moved + 1;"
                   % (name, name),
                   "      %s_was = %s_ref;" % (name, name)]
+    for name, width in held:
+        one = "u_dut.%s" % name
+        lines += ["      if ((%s ^ %s) === %d'd0 && (%s_last ^ %s_last) === "
+                  "%d'd0)" % (one, one, width, name, name, width),
+                  "        %s_seen = %s_seen | (%s ^ %s_last);"
+                  % (name, name, one, name),
+                  "      %s_last = %s;" % (name, one)]
     lines += ["      if (hit) bad = bad + 1;", "    end",
               "  endtask", "  initial begin"]
+    # A design with no reset starts at no value at all and stays there, and
+    # two modules that both hold nothing agree about nothing. Both are started
+    # from zero so that such a design runs, and runs alike on either side.
+    for tag, table in (("u_ref", start), ("u_dut", held)):
+        for name, _ in table:
+            lines.append("    %s.%s = 0;" % (tag, name))
     for name, _ in clk:
         lines.append("    %s = 0;" % name)
     for name, width in rst:
@@ -146,13 +179,17 @@ def bench(top, clk, rst, data, out, level, cycles):
         lines.append("      %s = (i < 3 || i == %d) ? {%d{1'b%s}} : {%d{1'b%s}};"
                      % (name, cycles // 2, width, level, width,
                         "1" if level == "0" else "0"))
-    lines += ["      #17 compare;", "      #1;", "    end",
+    lines += ["      #17 compare;", "      #1;", "    end"]
+    total = sum(width for _, width in held)
+    stirred = " + ".join("$countones(%s_seen)" % name for name, _ in held)
+    lines += ["    stirred = %s;" % (stirred or "0"),
               "    if (bad != 0) $display(\"  %0d of %0d cycles differ\","
               " bad, i);",
               "    else if (moved < 2) $display(\"  %0d cycles simulated, "
               "nothing moved on the outputs to compare\", i);",
               "    else $display(\"  %0d cycles simulated, %0d output changes,"
-              " recovered RTL matches the netlist\", i, moved);",
+              " %0d of " + str(total) + " registers stirred, recovered RTL "
+              "matches the netlist\", i, moved, stirred);",
               "    $finish(0);", "  end", "endmodule", ""]
     return "\n".join(lines)
 
@@ -200,9 +237,11 @@ def main(netlist, lifted, outdir):
         return 1
     # A design whose outputs never moved has been compared against nothing,
     # so it is given a longer run before that is what gets reported.
+    held, start = registers(lifted), registers(path)
     for cycles in (CYCLES, CYCLES * 10):
         out_text = simulate(path, lifted, workdir,
-                            bench(top, clk, rst, data, out, level, cycles))
+                            bench(top, clk, rst, data, out, level, cycles,
+                                  held, start))
         if out_text is None:
             return 1
         if "nothing moved" not in out_text:

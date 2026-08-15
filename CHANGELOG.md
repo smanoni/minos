@@ -64,6 +64,79 @@ All notable changes to this project are documented in this file.
   counter on a divided clock came back differing in most of its cycles until
   this one did too. No proof can see the difference, which is what simulating
   the recovered RTL is there for.
+- A run says how much of the design it stirred, counting the registers that
+  ever moved rather than only how often the ports did. Agreeing on the ports
+  says little when the state behind them sat still, and there was no way to
+  tell the two apart: a ripple counter was reported as matching over two
+  thousand cycles while every one of its registers held no value throughout
+  and every reported change came from a combinational path beside it. Across
+  the corpus a run reaches 402 of 884 registers, with an I2C controller and a
+  memory game lowest at a tenth and a quarter of theirs.
+- Both modules start their registers from zero. A design with no reset to
+  release holds no value from the outset and keeps it, and two modules that
+  both hold nothing agree about nothing, so what looked like a match was a
+  run over a design that had never started.
+- Registers stepping the same way on the same clock are put back into the word
+  they came from. Synthesis splits a word into bits and scatters them, so what
+  was one line of the design comes back as a register apiece; a row of them
+  sharing a shape is that word again, and the shape says what it was for, so
+  the row is named for what it does rather than numbered. Each operand of the
+  shape is written as the row reads it: a net every register takes from the
+  same place stays that net, one each takes from itself is the row, and the
+  rest are the bits gathered into a word of their own and named for the part
+  they play in the shape. The puzzle comes back with forty-five always blocks
+  where it had ninety-two.
+- The registers carrying an output are written as the word they are. Split
+  into a register apiece an output reads as eight unrelated blocks that happen
+  to share a clock; put back together, a byte that shifts is visibly a byte
+  that shifts, and an encryption core comes back as the one line of feedback
+  it is rather than as eight. The bits have to be neighbours and to agree on
+  clock and reset for one block to speak for them, but not on what they reset
+  to, which is a constant per bit and is written out as one word. Where the
+  registers are the whole port they are the port and take its name; where they
+  are part of it the word stands beside the port and is wired to the bits it
+  speaks for, since a net cannot be a register on some bits and a gate's
+  output on others. Across the corpus fifty-nine output bits become nine
+  words, leaving three standing alone; a multiply-accumulate goes from
+  seventeen blocks to three, a ripple counter from five to two.
+- A row of registers is split by the condition it asks rather than refused for
+  not agreeing on one. A conditional asks its question of the whole word, so
+  registers stepping alike on different conditions are not one word however
+  alike they step; asked who shares a condition, they come apart into the
+  words they are. An I2C controller keeps eight registers loaded together and
+  was coming back as sixty-eight loaded apart, because the whole family had
+  been turned away for disagreeing instead of grouped by what it disagreed on.
+- A register that can hold its value is written as the enable it has, not as
+  the choice it is made of. A stage that keeps its value does it by choosing
+  between what comes next and its own output, and read as data that choice
+  makes the stage look like it depends on whatever drives the enable: a row of
+  them stops looking like a chain at all, which is how an enabled shift
+  register came to be left as loose gates. Read as a condition, the enable is
+  visible in both places, and the register is only spoken of where it moves.
+- A net is written where it is defined, once, and the lines are put in the
+  order they build on each other. A declaration in one place and an assignment
+  in another is two lines saying what one says, and half the recovered text
+  was the first kind. What is left can be read downwards, each term resting on
+  what is above it.
+- A term too wide to read is broken where it binds least tightly, with the
+  operator at the front of each line where it can be seen against the ones
+  above it. Folding gates into their readers makes plenty of terms half a
+  screen wide, and a term that wide says nothing the broken one does not.
+- `scripts/observe.py`: names a register from what it is watched doing. A
+  layout carries no names out of the foundry: across the corpus not one net
+  is called anything but a number, and the only words in the whole input are
+  the ports. So a name cannot be recovered and would have to be invented,
+  which is worse than a number, since it asserts something about a circuit
+  nobody has ground truth for. What can be had honestly is what the design is
+  seen to do: a word that only ever gains bits is flags, one that steps by one
+  is a count, one whose bits move over by a place is a shift, one that changes
+  a bit at a time is gray, and a bit that goes up once and stays is latched.
+  Each is a claim about a whole run, dropped the moment one step contradicts
+  it, and kept only where three runs from different starts saw the same thing.
+  What no run settles keeps its number. A register carrying an output keeps
+  the port's name, but what it was seen doing is said anyway, since that is
+  usually the one register in a design a reader wants to know about. Renaming
+  cannot change behaviour and the simulation that follows says so either way.
 - `scripts/cosim.py`: simulates the recovered RTL beside the netlist it was
   lifted from, driving both from one clock and one stimulus. It says how often
   the netlist's own outputs moved, so a design that sat still is reported as
@@ -113,6 +186,34 @@ All notable changes to this project are documented in this file.
   differently, so the name cannot be carried across as it stands: a region
   port called n20 is not the n20 that gets written out. It is matched back to
   the bit behind it and named from that.
+- A row of registers no longer spreads one net across a word it does not fit.
+  A net beside a word is not repeated across it in Verilog but padded with
+  zeroes, which left every bit but the lowest answering to nothing; it is now
+  written out once per bit. The question a conditional asks is the exception,
+  being asked once of the whole word rather than of each bit in turn, and a
+  question is not always the first thing in a term either, since a conditional
+  can sit inside a larger one. No proof caught either: both are differences a
+  miter sees as the same function of the same nets.
+- A register carrying an output keeps the output's name rather than being put
+  in a row, which says more about it than any row could and is what the rest
+  of the module calls it by.
+- A cone is left alone where the design offers more operands than an
+  arithmetic form takes, instead of being wired to one that does not exist.
+- A word shifted up is recognised as one. The test asked whether the bits kept
+  were those of the shifted operand rather than of the operand itself, so a
+  register shifting towards the top could never match and no left-shifting
+  design was ever named for what it plainly was.
+- Looking at a design twice reads the first look as work already done. The
+  names this pass gives were being counted as names to number around, so a
+  second run turned flags0 into flags2; and every name is now put aside before
+  any is put back, since one register can be taking the name another gives up.
+- Giving up on a proof is no longer treated as a disproof. A module too large
+  to prove in the time allowed still has to be compiled and simulated, and
+  that simulation is the only evidence it has left; the puzzle proves nothing
+  whole and was being denied the run that speaks for it.
+- A net written where it is defined counts as declared. What a lifted block
+  names and does not drive is declared beside it, and the check for whether it
+  is declared already was looking for a declaration standing on its own.
 - A chain can be cut to the cells carrying one stage to the next, leaving what
   computes its serial input outside. Cut around everything feeding it, that
   logic arrives as several ports of its own and the region has more inputs

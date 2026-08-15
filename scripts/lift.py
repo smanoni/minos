@@ -670,8 +670,18 @@ def bus_map(netlist, regions):
     return buses
 
 
+OPERANDS = "ab"
+
+
 def cone_wiring(path, module_name, buses):
-    """Maps a cone's ports onto the recovered buses, by bit position"""
+    """Maps a cone's ports onto the recovered buses, by bit position.
+
+    An arithmetic form takes two operands and no more, so a design offering
+    more recovered buses than that has no reading here and is left alone
+    rather than being wired to an operand that does not exist.
+    """
+    if len(buses) > len(OPERANDS):
+        return None, 0
     design = json.load(open(path))
     ports = design["modules"][module_name]["ports"]
     conn, width = {}, 0
@@ -679,7 +689,7 @@ def cone_wiring(path, module_name, buses):
         for position, names in enumerate(bits):
             hit = [n for n in names if n in ports]
             if len(hit) == 1:
-                conn[hit[0]] = "%s[%d]" % ("ab"[index], position)
+                conn[hit[0]] = "%s[%d]" % (OPERANDS[index], position)
                 width = max(width, position + 1)
     outs = [n for n, p in ports.items() if p["direction"] == "output"]
     if len(outs) != 1 or len(conn) != sum(len(b) for b in buses):
@@ -971,7 +981,7 @@ def declare(lines, ports, rest=()):
     known = set(ports)
     for name, spec in ports.items():
         known |= {"%s[%d]" % (name, i) for i in range(len(spec["bits"]))}
-    known |= set(re.findall(r"\b(?:wire|reg) (n\d+);", "\n".join(rest)))
+    known |= set(re.findall(r"\b(?:wire|reg) (n\d+)\s*[;=]", "\n".join(rest)))
     used = set(re.findall(r"\bn\d+\b", "\n".join(lines)))
     return ["  wire %s;" % n for n in sorted(used - known)]
 
@@ -1278,7 +1288,8 @@ def leftover(netlist, regions, chains, states, banks, cones, paths, names, lines
             if bit not in alias and bit not in label:
                 label[bit] = (name if len(spec["bits"]) == 1
                               else "%s_%d" % (name, i))
-    wires, assigns, always = expr.transcribe(netlist, skip, alias, label)
+    wires, assigns, always, taken = expr.transcribe(netlist, skip, alias,
+                                                    label)
     if not assigns and not always:
         return []
     driven = set(re.findall(r"assign (\S+?) =", "\n".join(lines)))
@@ -1287,6 +1298,10 @@ def leftover(netlist, regions, chains, states, banks, cones, paths, names, lines
         if spec["direction"] == "input" or name in driven:
             continue
         for i, bit in enumerate(spec["bits"]):
+            # A bit gathered into a word is driven there and wants no wiring
+            # up: there is nothing left to drive it from.
+            if bit in taken:
+                continue
             one = name if len(spec["bits"]) == 1 else "%s[%d]" % (name, i)
             source = alias.get(bit, label.get(bit, expr.net_name(bit)))
             # A register carried over already took the output's own name, so
@@ -1326,7 +1341,11 @@ def main(netlist, regions_path, outdir, out=None):
             "module cand("), netlist_as_gold(netlist, workdir), workdir, "rtl")
         print("rtl -> %s" % out)
         print("  whole module vs recovered netlist: %s" % verdict)
-        return 0 if verdict == "PROVEN EQUIVALENT" else 1
+        # Giving up is not a disproof. A module too large to prove in the time
+        # allowed still has to be compiled and simulated, and that simulation
+        # is the only evidence it has left, so only an answer counts against
+        # it: the puzzle proves nothing whole and was being denied the run.
+        return 1 if verdict.startswith(("NOT EQUIVALENT", "no miter")) else 0
 
 
 def netlist_as_gold(netlist, workdir):

@@ -325,6 +325,51 @@ def mux_link(cells, driver, flop):
     return None
 
 
+def bit_support(cells, driver, ports, bit):
+    """The registers reaching one net, stopping at each of them"""
+    seen, flops, queue = set(), set(), [bit]
+    while queue:
+        at = queue.pop()
+        if at in seen:
+            continue
+        seen.add(at)
+        src = driver.get(at)
+        if src is None:
+            continue
+        if is_flop(cells, src):
+            flops.add(src)
+            continue
+        queue += [b for p, bits in cells[src]["connections"].items()
+                  for b in bits
+                  if cells[src]["port_directions"].get(p) == "input"]
+    return flops
+
+
+def hold_arm(cells, driver, flop):
+    """What a stage that can hold takes when it does not hold.
+
+    A register able to keep its value does it with a mux between its own
+    output and what comes next, and the select of that mux is an enable, not
+    data. Counted as data it makes the stage depend on whatever drives the
+    enable as well as on its neighbour, and a row of such stages stops
+    looking like a chain at all, which is how an enabled shift register came
+    to be left as loose gates.
+    """
+    conn = cells[flop]["connections"]
+    if "D" not in conn or "Q" not in conn:
+        return None
+    src = driver.get(conn["D"][0])
+    if src is None or cells[src]["type"] != "$_MUX_":
+        return None
+    mux = cells[src]["connections"]
+    own = conn["Q"][0]
+    if mux["A"][0] == own:
+        return mux["B"][0]
+    if mux["B"][0] == own:
+        return mux["A"][0]
+    return None
+
+
 def chains(cells, driver, ports):
     """Registers whose data comes from exactly one other register.
 
@@ -340,6 +385,9 @@ def chains(cells, driver, ports):
         srcs, inputs = data_support(cells, driver, ports, f)
         feed[f] = (srcs, inputs)
         others = srcs - {f}
+        arm = hold_arm(cells, driver, f)
+        if arm is not None:
+            others = bit_support(cells, driver, ports, arm) - {f}
         if len(others) == 1:
             prev[f] = others.pop()
     tails = set(prev.values())

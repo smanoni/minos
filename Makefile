@@ -184,6 +184,9 @@ corpus: deps
 # The proof also has no model of a clock net, which leaves the edge a design
 # runs on unchecked by it; simulating the recovered RTL beside the netlist
 # closes that, so it is run wherever there is a simulator to run it with.
+# The same simulator is what names a register, since the layout carries no
+# name out of the foundry and watching one is the only honest way to say what
+# it is for. Naming comes before the comparison so the comparison covers it.
 .PHONY: lift
 lift:
 	YOSYS="$(YOSYS)" $(PYTHON) $(SCRIPTS)/lift.py \
@@ -192,7 +195,10 @@ lift:
 	@command -v $(firstword $(IVERILOG)) >/dev/null || exit 0; \
 	$(IVERILOG) -g2012 -o /dev/null $(WORKDIR)/$(DESIGN)_lifted.sv
 	@command -v $(firstword $(VVP)) >/dev/null || exit 0; \
-	YOSYS="$(YOSYS)" IVERILOG="$(IVERILOG)" VVP="$(VVP)" \
+	IVERILOG="$(IVERILOG)" VVP="$(VVP)" \
+		$(PYTHON) $(SCRIPTS)/observe.py $(WORKDIR)/$(DESIGN)_generic.json \
+		$(WORKDIR)/$(DESIGN)_lifted.sv $(WORKDIR)
+	@YOSYS="$(YOSYS)" IVERILOG="$(IVERILOG)" VVP="$(VVP)" \
 		$(PYTHON) $(SCRIPTS)/cosim.py $(WORKDIR)/$(DESIGN)_generic.json \
 		$(WORKDIR)/$(DESIGN)_lifted.sv $(WORKDIR)
 
