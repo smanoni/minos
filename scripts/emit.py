@@ -45,7 +45,9 @@ def share(parent, chains, roles, shared, out):
 
     module = design["modules"][first]
     order = {}
-    for old, role in roles[chains[0][0]].items():
+    # What region_wiring hands back is the connection map and the widths it
+    # implied; only the map names ports.
+    for old, role in roles[chains[0][0]][0].items():
         order[old] = role
     module["ports"] = {order.get(n, n): p for n, p in module["ports"].items()}
     design["modules"][shared] = module
@@ -58,9 +60,10 @@ def share(parent, chains, roles, shared, out):
             if cell["type"] != name:
                 continue
             cell["type"] = shared
-            cell["connections"] = {roles[index].get(p, p): b
+            wired = roles[index][0]
+            cell["connections"] = {wired.get(p, p): b
                                    for p, b in cell["connections"].items()}
-            cell["port_directions"] = {roles[index].get(p, p): d
+            cell["port_directions"] = {wired.get(p, p): d
                                        for p, d in cell["port_directions"].items()}
     json.dump(design, open(out, "w"))
     return out
