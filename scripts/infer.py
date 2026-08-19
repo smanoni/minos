@@ -22,11 +22,16 @@ HOST = os.environ.get("MINOS_MODEL_HOST", "http://127.0.0.1:11434")
 THREADS = int(os.environ.get("MINOS_MODEL_THREADS", "32"))
 BUDGET = int(os.environ.get("MINOS_SLICE", "70"))
 
-# How many of a design's combinational nets to ask about. Naming all of them
-# is most of a day's work for a model and most of it wasted: a net defined
-# three lines above its only reader costs nothing to hold, and a name would
-# only lengthen the line. What costs a reader is distance, so the ones asked
-# about are the ones held longest.
+# How many of a design's combinational nets to ask about. Naming all eighteen
+# hundred of them across the corpus is half a day of a model for perhaps fifty
+# more names, so a design's are ranked and the head of the list taken.
+#
+# Ranking by how far a net is carried is a way of choosing which names would
+# help a reader most, not a way of finding the ones a model can answer: over
+# the designs with enough nets to fill the list, the four quarters of it came
+# back 3, 1, 2 and 1 named out of sixty. What predicts an answer is the
+# design, not the net. Small clean ones give a name for most of what is asked;
+# the big flattened ones give one in fifty wherever in the ranking you look.
 WIDEST = int(os.environ.get("MINOS_NAMES", "24"))
 
 # Whether to put a question a second time showing what a net feeds, where
@@ -322,9 +327,11 @@ def furthest(text, names, many):
     """The nets a reader carries longest, worst first.
 
     A net is on a reader's hands from the first place it is mentioned to the
-    last place it is read. Most are met and done with inside a few lines and a
-    name would buy nothing; a handful are held across most of a module, and
-    those are the ones worth spending a model on.
+    last place it is read. Most are met and done with inside a few lines, and
+    a name there buys a reader nothing they did not already have; a handful
+    are held across most of a module, and a name on one of those is worth the
+    asking. This orders by what a name would be worth, which is not the same
+    as what a model can answer, and measured it does nothing for the second.
     """
     first, last = {}, {}
     for at, line in enumerate(text.splitlines()):
