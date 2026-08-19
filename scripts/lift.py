@@ -1019,51 +1019,56 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
               % index)
         del banks[index], names[index]
 
-    lines = []
+    # Each recovered region is one piece, kept whole. Where the pieces go is
+    # not settled here: they read gates that are written down further on, and
+    # the arranger weighs putting them first against putting them among the
+    # logic they read.
+    proven = []
     for index, info in sorted(chains.items()):
         reg = names[index]
-        lines.append("  reg [%d:0] %s;" % (info["width"] - 1, reg))
+        piece = ["  reg [%d:0] %s;" % (info["width"] - 1, reg)]
         if info.get("form") == "load":
-            lines += load_shift_body(info["width"], info["shift_on"], reg,
+            piece += load_shift_body(info["width"], info["shift_on"], reg,
                                      roles[index], info["edges"])
         elif info.get("form") == "lfsr":
-            lines += lfsr_body(info["width"], info["mask"], info["enable"],
+            piece += lfsr_body(info["width"], info["mask"], info["enable"],
                                info["clear"], reg, roles[index],
                                info["edges"])
         else:
-            lines += shift_body(info["width"], info["enable"], info["clear"],
+            piece += shift_body(info["width"], info["enable"], info["clear"],
                                 reg, roles[index], info["edges"])
-        lines.append("")
+        proven.append(piece)
     for index, info in sorted(states.items()):
         reg = names[index]
-        lines.append("  reg [%d:0] %s;" % (info["width"] - 1, reg))
-        lines += count_body(info["width"], info["clear"], info["en"],
+        piece = ["  reg [%d:0] %s;" % (info["width"] - 1, reg)]
+        piece += count_body(info["width"], info["clear"], info["en"],
                             info["updown"], info["step"], reg, roles[index],
                             info["edges"])
-        lines.append("")
+        proven.append(piece)
     for index, info in sorted(banks.items()):
         reg = names[index]
         role = dict(roles[index])
         role["d"] = "{%s}" % ", ".join(
             role["d%d" % i] for i in reversed(range(info["width"])))
-        lines.append("  reg [%d:0] %s;" % (info["width"] - 1, reg))
-        lines += load_body(info["width"], info["enable"], info["clear"],
+        piece = ["  reg [%d:0] %s;" % (info["width"] - 1, reg)]
+        piece += load_body(info["width"], info["enable"], info["clear"],
                            reg, role, info["edges"])
-        lines.append("")
+        proven.append(piece)
     for output, info in sorted(cones.items()):
         expr = info["form"].replace("y", output, 1) % (info["width"] + 1,
                                                        info["constant"])
         for slot, letter in enumerate("ab"):
             expr = re.sub(r"\b%s\b" % letter, names.get(slot, letter), expr)
-        lines.append("  " + expr)
+        proven.append(["  " + expr])
     for output, info in sorted(paths.items()):
-        lines.append("  assign %s = %s %s %s;"
-                     % (output, slice_of(info["a"]), info["op"],
-                        slice_of(info["b"])))
-    lines += output_wiring(ports, chains, names)
+        proven.append(["  assign %s = %s %s %s;"
+                       % (output, slice_of(info["a"]), info["op"],
+                          slice_of(info["b"]))])
+    proven += [[one] for one in output_wiring(ports, chains, names)]
+    lines = [one for piece in proven for one in piece]
     rest = leftover(netlist, regions, chains, states, banks, cones, paths,
-                    names, lines)
-    lines = head + declare(lines, ports, rest) + [""] + lines + rest
+                    names, lines, proven)
+    lines = head + declare(lines, ports, rest) + rest
     open(out, "w").write("\n".join(lines + ["endmodule", ""]))
     return out
 
@@ -1255,7 +1260,8 @@ def exclusive(module, inside):
     return inside - keep
 
 
-def leftover(netlist, regions, chains, states, banks, cones, paths, names, lines):
+def leftover(netlist, regions, chains, states, banks, cones, paths,
+             names, lines, proven=()):
     """Everything no template claimed, written out as plain expressions.
 
     A module is only worth proving as a whole once every output is driven, so
@@ -1288,9 +1294,8 @@ def leftover(netlist, regions, chains, states, banks, cones, paths, names, lines
             if bit not in alias and bit not in label:
                 label[bit] = (name if len(spec["bits"]) == 1
                               else "%s_%d" % (name, i))
-    wires, assigns, always, taken = expr.transcribe(netlist, skip, alias,
-                                                    label)
-    if not assigns and not always:
+    wires, body, taken = expr.transcribe(netlist, skip, alias, label, proven)
+    if not body:
         return []
     driven = set(re.findall(r"assign (\S+?) =", "\n".join(lines)))
     tail = []
@@ -1308,7 +1313,7 @@ def leftover(netlist, regions, chains, states, banks, cones, paths, names, lines
             # wiring it up again would assign the port to itself.
             if one not in driven and source != one:
                 tail.append("  assign %s = %s;" % (one, source))
-    return [""] + wires + [""] + assigns + always + tail
+    return [""] + wires + [""] + body + tail
 
 
 def main(netlist, regions_path, outdir, out=None):

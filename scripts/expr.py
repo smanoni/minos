@@ -313,7 +313,266 @@ def net_name(bit):
     return "n%s" % bit
 
 
-def transcribe(path, skip, alias, label=None):
+BASE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+# How many items a net may touch and still say something about which of them
+# belong together. A clock, a reset or a global enable reaches most of a
+# design and would pull the whole of it into one group.
+SPREAD = int(os.environ.get("MINOS_SPREAD", "12"))
+
+
+def sections(items, rounds=30):
+    """Which group each item belongs to, by what it has to do with the rest.
+
+    A design flattened by synthesis is one long module, but it is not one long
+    thought: most of its nets are read only by their neighbours. Each item
+    joins whichever group it already shares most nets with, over and over
+    until nothing moves, which finds those neighbourhoods without being told
+    how many to look for. A net touching a large part of the design says
+    nothing about who belongs with whom and is not allowed to vote.
+
+    Laid out a group at a time, a net read only inside one group is carried
+    only while that group is being read, and can be forgotten at its end.
+    About two thirds of them are, which is the whole of why this is worth
+    doing.
+    """
+    touch = {}
+    for at, (lines, head, reads) in enumerate(items):
+        for name in reads | ({head} if head is not None else set()):
+            touch.setdefault(name, set()).add(at)
+    label = list(range(len(items)))
+    for _ in range(rounds):
+        moved = 0
+        for at, (lines, head, reads) in enumerate(items):
+            votes = {}
+            for name in reads:
+                if name not in touch or len(touch[name]) > SPREAD:
+                    continue
+                for other in touch[name]:
+                    if other != at:
+                        votes[label[other]] = votes.get(label[other], 0) + 1
+            if votes:
+                best = max(sorted(votes), key=lambda g: votes[g])
+                if best != label[at]:
+                    label[at] = best
+                    moved += 1
+        if not moved:
+            break
+    return label
+
+
+def knots(items, label):
+    """The same grouping, with any groups that wait on each other folded in.
+
+    Nearness is not order: two groups can each read something the other
+    defines. Laid out one whole group at a time there is then no order that
+    puts every net before the lines reading it, and the reader meets a number
+    with nothing said about it yet. Folded together they are one section and
+    an order inside it exists again, at the price of a section large enough to
+    hold both. Which of those two prices is lower is not the same design to
+    design, so both groupings are laid out and the cheaper is kept.
+    """
+    where = {}
+    for at, (lines, head, reads) in enumerate(items):
+        if head is not None:
+            where[head] = label[at]
+    edge = {}
+    for one in set(label):
+        edge[one] = set()
+    for at, (lines, head, reads) in enumerate(items):
+        for name in reads:
+            if name in where and where[name] != label[at]:
+                edge[label[at]].add(where[name])
+    # Tarjan, kept to a stack of its own so a deep chain of sections cannot
+    # run the interpreter out of frames.
+    index, low, stack, on, comp = {}, {}, [], set(), {}
+    for root in sorted(edge):
+        if root in index:
+            continue
+        index[root] = low[root] = len(index)
+        stack.append(root)
+        on.add(root)
+        work = [(root, iter(sorted(edge[root])))]
+        while work:
+            node, kids = work[-1]
+            for kid in kids:
+                if kid not in index:
+                    index[kid] = low[kid] = len(index)
+                    stack.append(kid)
+                    on.add(kid)
+                    work.append((kid, iter(sorted(edge[kid]))))
+                    break
+                if kid in on:
+                    low[node] = min(low[node], index[kid])
+            else:
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[node])
+                if low[node] == index[node]:
+                    while True:
+                        one = stack.pop()
+                        on.discard(one)
+                        comp[one] = node
+                        if one == node:
+                            break
+    return [comp[one] for one in label]
+
+
+def carried(order):
+    """What an order asks of a reader, per line of the module.
+
+    A net written as a number means nothing on its own, so a reader meeting
+    one holds it until the last place it is read. Held from where it is
+    defined they at least know what they are holding; met before that, they
+    are carrying a token nothing has yet attached a meaning to, which is
+    worse, and counts twice. This is the whole of what the layout is trying to
+    make small, and it is here so that a run can say what it achieved rather
+    than the claim having to be taken on trust.
+    """
+    at, first, last, made = 0, {}, {}, {}
+    for lines, head, reads in order:
+        for name in reads | ({head} if head is not None else set()):
+            if NUMBERED.match(name):
+                first.setdefault(name, at)
+                last[name] = at
+        if head is not None:
+            made.setdefault(head, at)
+        at += len(lines)
+    if not at:
+        return 0.0
+    total = 0
+    for name, start in first.items():
+        told = made.get(name, start)
+        total += max(0, last[name] - max(told, start))
+        total += 2 * max(0, min(told, last[name]) - start)
+    return total / float(at)
+
+
+def closing(items, waiting, done):
+    """The items in the order that asks least of a reader, greedily.
+
+    Take whatever is ready and closes the most nets while opening the fewest,
+    a net being closed when nothing further is waiting on it. Only the nets
+    written as a number count: a reader carries n565 until they are told what
+    reads it, and carries word1_in0 not at all, its name being what it is for.
+    A design with a combinational loop in it has nothing ready at some point,
+    and is given whatever is left rather than refused an order.
+    """
+    def gain(item):
+        lines, head, reads = item
+        closes = sum(1 for n in reads if n in waiting and n != head
+                     and waiting[n] == 1 and NUMBERED.match(n))
+        opens = 1 if head is not None and NUMBERED.match(head) else 0
+        return (closes - opens, -len(lines))
+
+    left, out = list(items), []
+    while left:
+        ready = [it for it in left
+                 if all(n in done or n not in waiting or n == it[1]
+                        for n in it[2])]
+        pick = max(ready or left, key=gain)
+        for name in pick[2]:
+            if name in waiting and name != pick[1]:
+                waiting[name] -= 1
+        if pick[1] is not None:
+            done.add(pick[1])
+        out.append(pick)
+        left.remove(pick)
+    return out
+
+
+def laid(items, label, waiting):
+    """Every item, a group at a time, groups in the order they depend on
+
+    A group is ready once every group defining what it reads is written down.
+    Where they wait on each other, the one waiting on least goes, and what it
+    reads and has not been told is met early.
+    """
+    groups = {}
+    for at, one in enumerate(label):
+        groups.setdefault(one, []).append(items[at])
+    where = {}
+    for one, members in groups.items():
+        for lines, head, reads in members:
+            if head is not None:
+                where[head] = one
+    needs = dict((one, set(where[n] for lines, head, reads in members
+                           for n in reads
+                           if n in where and where[n] != one))
+                 for one, members in groups.items())
+    out, done, gone = [], set(), set()
+    while len(gone) < len(groups):
+        ready = [one for one in sorted(groups)
+                 if one not in gone and not (needs[one] - gone)]
+        if not ready:
+            ready = [min((one for one in sorted(groups) if one not in gone),
+                         key=lambda one: len(needs[one] - gone))]
+        pick = min(ready, key=lambda one: (len(groups[one]), one))
+        out += closing(groups[pick], waiting, done)
+        gone.add(pick)
+    return out
+
+
+def demand(items):
+    """How many items are still waiting to read each net an item defines"""
+    counts = {}
+    for lines, head, reads in items:
+        if head is not None:
+            counts.setdefault(head, 0)
+    for lines, head, reads in items:
+        for name in reads:
+            if name in counts and name != head:
+                counts[name] += 1
+    return counts
+
+
+def arrange(defs, blocks, proven=()):
+    """The lines put in the order that asks least of a reader.
+
+    A reader meeting n565 has to carry it until the last place it is read, and
+    what a module costs to read is how many such numbers it makes them carry
+    at once. Written out in the order the nets happened to be found, and with
+    every register left to the end, a design of six hundred lines asks for
+    forty at a time; written out in groups of what belongs together, each line
+    coming as late as it can, the same design asks for twenty.
+
+    What was recovered whole and proven equivalent has always gone first, on
+    the grounds that it is the part worth reading; but it reads gates that
+    have not been written down yet, and on one design that alone was four
+    fifths of everything the reader was carrying. Whether it is better at the
+    front or in among the logic it reads is not the same answer for every
+    design, so both are laid out, along with both ways of grouping, and the
+    one that asks least is kept.
+    """
+    def touches(lines):
+        return set(BASE.findall("\n".join(lines)))
+
+    items = [(lines, BASE.match(name).group(0), touches(lines))
+             for lines, name in defs]
+    items += [(lines, None, touches(lines)) for lines in blocks]
+    stock = [(lines, None, touches(lines)) for lines in proven]
+
+    tries = []
+    label = sections(items)
+    for choice in (label, knots(items, label)):
+        tries.append(stock + laid(items, choice, demand(items)))
+    if stock:
+        whole = items + stock
+        label = sections(whole)
+        for choice in (label, knots(whole, label)):
+            tries.append(laid(whole, choice, demand(whole)))
+    out = []
+    for lines, head, reads in min(tries, key=carried):
+        # A register standing among the nets that feed it wants a line's space
+        # around it, or the block runs on from the wire above and the eye has
+        # nothing to catch.
+        if head is None and out:
+            out += [""]
+        out += lines
+    return out
+
+
+def transcribe(path, skip, alias, label=None, proven=()):
     """Wires, assignments and always blocks for every cell not skipped.
 
     A net that more than one gate reads becomes a wire of its own, so the
@@ -324,7 +583,7 @@ def transcribe(path, skip, alias, label=None):
     wiring up afterwards.
     """
     module, cells, driver, fanout = load(path)
-    wires, assigns, always = [], [], []
+    wires, defs, blocks = [], [], []
     named, label = dict(alias), dict(label or {})
 
     def show(bit):
@@ -593,7 +852,7 @@ def transcribe(path, skip, alias, label=None):
         # A bit of a named word is declared with the word, not on its own.
         head = ("  assign %s = " if INDEXED.match(show(target))
                 else "  wire %s = ") % show(target)
-        assigns += wrap(head, expand(written[target])[0], ";")
+        defs.append((wrap(head, expand(written[target])[0], ";"), show(target)))
 
     for word, (port, run, parts, entire) in sorted(ports_of.items()):
         edge, clock, redge, rst = sensitivity(parts[0])[:4]
@@ -602,20 +861,20 @@ def transcribe(path, skip, alias, label=None):
                                   for c in reversed(parts))
         wires.append("  reg [%d:0] %s;" % (wide - 1, word))
         if not entire:
-            assigns.append("  assign %s[%d:%d] = %s;"
-                           % (port, run[-1], run[0], word))
+            defs.append((["  assign %s[%d:%d] = %s;"
+                          % (port, run[-1], run[0], word)], port))
         if redge is None:
-            always += (["  always @(%s %s)" % (edge, clock)]
-                       + moves("    ", word, data))
+            blocks.append(["  always @(%s %s)" % (edge, clock)]
+                          + moves("    ", word, data))
             continue
         # Each bit resets to a value of its own, so the word resets to those
         # values written out as one, rather than to a word of the same digit.
         start = "".join(flop_kind(c["type"])[2] for c in reversed(parts))
-        always += ["  always @(%s %s or %s %s)" % (edge, clock, redge, rst),
-                   "    if (%s%s) %s <= %d'b%s;"
-                   % ("!" if redge == "negedge" else "", rst, word, wide,
-                      start),
-                   "    else"] + moves("      ", word, data)
+        blocks.append(["  always @(%s %s or %s %s)" % (edge, clock, redge, rst),
+                       "    if (%s%s) %s <= %d'b%s;"
+                       % ("!" if redge == "negedge" else "", rst, word, wide,
+                          start),
+                       "    else"] + moves("      ", word, data))
 
     for word, key, members in rows:
         edge, clock, redge, rst, value = key[:5]
@@ -626,14 +885,14 @@ def transcribe(path, skip, alias, label=None):
         data = key[-1] % tuple(word if c is None else c for c in cols)
         wires.append("  reg [%d:0] %s;" % (wide - 1, word))
         if redge is None:
-            always += (["  always @(%s %s)" % (edge, clock)]
-                       + moves("    ", word, data))
+            blocks.append(["  always @(%s %s)" % (edge, clock)]
+                          + moves("    ", word, data))
             continue
-        always += ["  always @(%s %s or %s %s)" % (edge, clock, redge, rst),
-                   "    if (%s%s) %s <= {%d{1'b%s}};"
-                   % ("!" if redge == "negedge" else "", rst, word, wide,
-                      value),
-                   "    else"] + moves("      ", word, data)
+        blocks.append(["  always @(%s %s or %s %s)" % (edge, clock, redge, rst),
+                       "    if (%s%s) %s <= {%d{1'b%s}};"
+                       % ("!" if redge == "negedge" else "", rst, word, wide,
+                          value),
+                       "    else"] + moves("      ", word, data))
 
     grouped = {c["connections"]["Q"][0] for _, _, ms in rows for _, c in ms}
     for name, cell in cells.items():
@@ -650,15 +909,15 @@ def transcribe(path, skip, alias, label=None):
         clock = build(cell["connections"]["C"][0], ATOM)
         data = build(cell["connections"]["D"][0], MUX)
         if redge is None:
-            always += (["  always @(%s %s)" % (edge, clock)]
-                       + moves("    ", reg, data))
+            blocks.append(["  always @(%s %s)" % (edge, clock)]
+                          + moves("    ", reg, data))
             continue
         rst = build(cell["connections"]["R"][0], ATOM)
-        always += ["  always @(%s %s or %s %s)" % (edge, clock, redge, rst),
-                   "    if (%s%s) %s <= 1'b%s;"
-                   % ("!" if redge == "negedge" else "", rst, reg, value),
-                   "    else"] + moves("      ", reg, data)
-    return wires, assigns, always, taken
+        blocks.append(["  always @(%s %s or %s %s)" % (edge, clock, redge, rst),
+                       "    if (%s%s) %s <= 1'b%s;"
+                       % ("!" if redge == "negedge" else "", rst, reg, value),
+                       "    else"] + moves("      ", reg, data))
+    return wires, arrange(defs, blocks, proven), taken
 
 
 def net_of(path, name):
