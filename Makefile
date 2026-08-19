@@ -66,13 +66,6 @@ SV2V      ?= sv2v
 CC        := $(DEPS)/common_cells
 SV2VFLAGS := -DSYNTHESIS -DASSERTS_OFF -I$(CC)/include
 
-CC_MODULES ?= cc_gray_to_binary:Width=8 \
-              cc_binary_to_gray:Width=8 \
-              cc_popcount:InputWidth=8 \
-              cc_counter:Width=8 \
-              cc_shift_register:Depth=8 \
-              cc_lfsr_8bit:Width=8
-
 PDK_TAG   := sky130-ff08c23db8359afce3f134c454e7930586d0641c
 PDK_URL   := https://github.com/fossi-foundation/ciel-releases/releases/download/$(PDK_TAG)
 PDK_PARTS := common sky130_fd_pr sky130_fd_pr_reram sky130_fd_io sky130_ml_xx_hd \
@@ -223,26 +216,15 @@ match: cc
 		$(WORKDIR)/$(DESIGN)_generic.json $(WORKDIR)/$(DESIGN)_regions.json \
 		$(WORKDIR)/lib $(WORKDIR)
 
+# The library is not built to a fixed size any more. A design's counter is as
+# wide as it is, and a reference built at one width has nothing to offer any
+# design that does not happen to share it: the corpus holds a 26 bit counter
+# that a library built at 8 never matched. What is needed is elaborated when a
+# region asks for it, by scripts/match.py, and kept in work/lib once built.
 .PHONY: cc
 cc: $(TMPDIR)/common_cells.v
 	@mkdir -p $(WORKDIR)/lib $(TMPDIR)
-	@for spec in $(CC_MODULES); do \
-		mod=$${spec%%:*}; name=$$mod; chparam=""; \
-		if [ "$$spec" != "$$mod" ]; then \
-			for p in $$(echo $${spec#*:} | tr ',' ' '); do \
-				chparam="$$chparam -chparam $${p%%=*} $${p#*=}"; \
-				name="$${name}_$${p%%=*}$${p#*=}"; \
-			done; \
-		fi; \
-		sed -e "s|IN_V|$(TMPDIR)/common_cells.v|" \
-		    -e "s|TOPSPEC|-top $$mod$$chparam|" \
-		    -e "s|LOG|$(TMPDIR)/$$name.log|" \
-		    -e "s|OUT_JSON|$(WORKDIR)/lib/$$name.json|" \
-		    -e "s|OUT_V|$(TMPDIR)/$$name.v|" \
-		    $(SCRIPTS)/cc_lib.ys > $(TMPDIR)/$$name.ys; \
-		$(YOSYS) -q -s $(TMPDIR)/$$name.ys || exit 1; \
-		echo "  $$name"; \
-	done
+	@echo "  common_cells ready to elaborate on demand"
 
 $(TMPDIR)/common_cells.v: | $(WORKDIR)
 	$(SV2V) $(SV2VFLAGS) $(CC)/src/*.sv > $@ 2> $(TMPDIR)/common_cells_sv2v.log

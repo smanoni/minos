@@ -21,6 +21,25 @@ YOSYS = os.environ.get("YOSYS", "yosys")
 TIMEOUT = int(os.environ.get("MINOS_TIMEOUT", "300"))
 FLOP = "DFF"
 
+# The library, as modules and the parameter that sizes each, rather than as
+# modules already built at some width. A design's counter is as wide as it is,
+# and a library held at one width matches nothing but designs that happen to
+# share it: the corpus has a 26 bit counter and a library built at 8 never had
+# anything to offer it.
+LIBRARY = [
+    ("cc_counter", "Width"),
+    ("cc_shift_register", "Depth"),
+    ("cc_lfsr_8bit", "Width"),
+    ("cc_popcount", "InputWidth"),
+    ("cc_gray_to_binary", "Width"),
+    ("cc_binary_to_gray", "Width"),
+]
+
+# How wide a library module is worth building. Nothing in the corpus holds
+# more than a few tens of bits in one region, and the search below is over the
+# parameter, not over this, so a generous ceiling costs a few seconds once.
+WIDEST = int(os.environ.get("MINOS_CC_WIDEST", "64"))
+
 
 def signature(path, top=None):
     """Interface width and cell mix, the cheap test before proving anything"""
@@ -40,6 +59,8 @@ def signature(path, top=None):
     return {"module": name, "inputs": ins, "outputs": outs,
             "flops": sum(1 for c in cells.values() if FLOP in c["type"]),
             "cells": len(cells),
+            "widths": sorted((len(p["bits"]) for p in module.get("ports", {}).values()
+                              if p["direction"] != "input"), reverse=True),
             "mix": collections.Counter(c["type"] for c in cells.values())}
 
 
@@ -371,6 +392,40 @@ def ref_wiring(path, module, width):
     return conn
 
 
+def ref_state_wiring(path, module, width, cwidth):
+    """Maps a reference onto a state group's roles, tying off what it lacks.
+
+    A group that feeds itself takes no data, so every input a reference has
+    beyond its clock, reset and enable is something the design never drove and
+    is held at zero: a library counter offers a load value and a direction, and
+    a design that only ever counts up from where it was uses neither. The
+    enable follows the region — where a region has no enable the reference is
+    held on, or it would be proved against a counter that never counts.
+    """
+    port = json.load(open(path))["modules"][module]["ports"]
+    conn, taken = {}, set()
+    for role, pattern in CONTROL:
+        for name in sorted(port):
+            if name in taken or port[name]["direction"] != "input":
+                continue
+            if pattern in name.lower():
+                conn[name] = {"clr": "1'b0",
+                              "en": "c[0]" if cwidth else "1'b1"}.get(role, role)
+                taken.add(name)
+                break
+    for name in sorted(port):
+        if port[name]["direction"] == "input" and name not in taken:
+            conn[name] = "%d'b0" % len(port[name]["bits"])
+    outs = [n for n in sorted(port) if port[n]["direction"] == "output"]
+    wide = [n for n in outs if len(port[n]["bits"]) == width]
+    if not wide:
+        return None
+    conn[wide[0]] = "q"
+    for name in outs:
+        conn.setdefault(name, "")
+    return conn
+
+
 def region_wiring(ren):
     """The same map for a region, whose roles came from its own structure.
 
@@ -493,76 +548,167 @@ def prove(a, b, workdir, tag):
     return "NOT EQUIVALENT"
 
 
+def widest(sig):
+    """The widest thing a module puts out, which is its data if it has any"""
+    return sig["widths"][0] if sig["widths"] else 0
+
+
 def compatible(region, ref):
-    """A reference cannot match a region of a different shape"""
-    return (region["flops"] == ref["flops"]
-            and region["inputs"] <= ref["inputs"] + 2
-            and region["outputs"] <= ref["outputs"] + 2)
+    """A reference cannot match a region of a different shape.
+
+    Built to order the shapes are close by construction, so what is left to
+    check is loose: a reference may hold state a region does not, a counter
+    keeping an overflow bit the design never kept, and still agree on every
+    output the design has. What it may not do is be smaller than the region,
+    since nothing that has fewer registers can hold what the region holds.
+    """
+    return ref["flops"] >= region["flops"]
+
+
+def elaborate(source, module, param, value, libdir, workdir):
+    """One library module built at one parameter value, kept once it is built.
+
+    Building is under half a second and the answer never changes, so what has
+    been asked for once is read off disk from then on, across regions and
+    across designs.
+    """
+    name = "%s_%s%d" % (module, param, value)
+    path = "%s/%s.json" % (libdir, name)
+    if os.path.exists(path):
+        return name, path
+    script = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "cc_lib.ys")).read()
+    for was, now in (("IN_V", source),
+                     ("TOPSPEC", "-top %s -chparam %s %d" % (module, param, value)),
+                     ("LOG", "/dev/null"), ("OUT_JSON", path),
+                     ("OUT_V", "%s/%s.v" % (workdir, name))):
+        script = script.replace(was, now)
+    code, log = yosys(script.strip().split("\n"), "%s/%s.ys" % (workdir, name))
+    if code or not os.path.exists(path):
+        return None, None
+    return name, path
+
+
+def fitted(source, module, param, width, libdir, workdir):
+    """The parameter at which a library module puts out as wide a word.
+
+    Width is the thing that has to agree: a design's counter is as wide as it
+    is, and a reference narrower than it cannot hold what it holds however
+    many registers it has. Register counts are not the key, because they need
+    not agree at all — a library counter keeps an overflow bit that a design
+    which never needed one does not.
+
+    A module's width grows with its parameter but not in step with it, and
+    writing that relation down for each would be one more thing to keep true
+    as the library grows, so it is searched for by halving. Six builds settle
+    any width up to sixty four, and each is paid once for the whole corpus.
+    """
+    low, high = 1, WIDEST
+    while low <= high:
+        mid = (low + high) // 2
+        name, path = elaborate(source, module, param, mid, libdir, workdir)
+        if path is None:
+            return None
+        got = signature(path)
+        if widest(got) == width:
+            return name, path, got
+        if widest(got) < width:
+            low = mid + 1
+        else:
+            high = mid - 1
+    return None
+
+
+def library_for(source, width, flops, libdir, workdir):
+    """Every library module built to one region's size, worth proving against.
+
+    The width wanted is the one the region's own roles imply and not anything
+    read off its ports: a region comes out of extraction with its bus split
+    into a port per bit, so its widest port is one however wide the word is.
+    """
+    out = []
+    for module, param in LIBRARY:
+        got = fitted(source, module, param, width, libdir, workdir)
+        if got and got[2]["flops"] >= flops:
+            out.append(got)
+    return out
 
 
 def main(netlist, regions_path, libdir, outdir):
     workdir = os.path.join(outdir, "tmp")
     os.makedirs(workdir, exist_ok=True)
+    os.makedirs(libdir, exist_ok=True)
     regions = json.load(open(regions_path))
-    refs = {}
-    for path in sorted(glob.glob(libdir + "/*.json")):
-        name = os.path.basename(path)[:-5]
-        refs[name] = signature(path)
-
-    print("references")
-    for name, sig in refs.items():
-        print("  %-28s %2d in %2d out %3d cells %2d flops"
-              % (name, sig["inputs"], sig["outputs"], sig["cells"], sig["flops"]))
+    source = "%s/common_cells.v" % workdir
+    if not os.path.exists(source):
+        print("no library to match against, run make cc first")
+        return 1
 
     print("regions")
-    chains = []
-    for i, region in enumerate(regions):
-        if region["kind"] != "chain":
+    found, chains = {}, []
+    for index, region in enumerate(regions):
+        kind = region["kind"]
+        if kind not in ("chain", "state"):
             continue
-        got = extract(netlist, region, i, workdir)
+        got = extract(netlist, region, index, workdir, expose=(kind == "state"))
         if not got:
             continue
         path, name = got
         sig = signature(path, name)
-        print("  %-20s %2d in %2d out %3d cells %2d flops"
-              % ("region %d (%s)" % (i, region["kind"]),
-                 sig["inputs"], sig["outputs"], sig["cells"], sig["flops"]))
-        cand = [n for n, r in refs.items() if compatible(sig, r)]
-        print("      candidates: %s" % (", ".join(cand) if cand else "none"))
-        chains.append((i, path, name, roles(path, name, region["registers"]), cand))
-
-    print("proofs")
-    for idx, path, name, ren, cand in chains:
-        got = region_wiring(ren)
-        if got is None:
-            print("  region %d: more inputs than a chain has roles" % idx)
+        ren = (state_roles if kind == "state" else roles)(
+            path, name, region["registers"])
+        wiring = region_wiring(ren)
+        if wiring is None:
+            print("  region %d (%s)  no roles of its own" % (index, kind))
             continue
-        conn, width, dwidth, _ = got
-        if not canonicalise(path, name, conn, width, "gold", workdir, dwidth):
-            print("  region %d: could not be wrapped" % idx)
+        conn, width, dwidth, cwidth = wiring
+        if kind == "chain":
+            chains.append((index, path, name, ren))
+        # A group that feeds itself is wrapped by its control and its whole
+        # register; a chain by its serial input and its taps.
+        build = None
+        if kind == "state":
+            build = lambda n, i, c, w, d, at=cwidth: state_wrapper(n, i, c, w, at)
+        if not canonicalise(path, name, conn, width, "gold", workdir,
+                            dwidth, build):
+            print("  region %d (%s)  could not be wrapped" % (index, kind))
             continue
-        for ref in cand:
-            refpath = "%s/%s.json" % (libdir, ref)
-            wiring = ref_wiring(refpath, refs[ref]["module"], width)
-            if wiring is None:
-                print("  region %d vs %-26s no role correspondence" % (idx, ref))
+        tried = library_for(source, width, sig["flops"], libdir, workdir)
+        print("  region %d (%s)  %d wide, %d registers, %d to try"
+              % (index, kind, width, sig["flops"], len(tried)))
+        for refname, refpath, refsig in tried:
+            wired = (ref_state_wiring(refpath, refsig["module"], width, cwidth)
+                     if kind == "state"
+                     else ref_wiring(refpath, refsig["module"], width))
+            if wired is None:
                 continue
-            if not canonicalise(refpath, refs[ref]["module"], wiring, width,
-                                "gate", workdir):
-                print("  region %d vs %-26s reference could not be wrapped"
-                      % (idx, ref))
+            if not canonicalise(refpath, refsig["module"], wired, width,
+                                "gate", workdir, dwidth, build):
                 continue
-            print("  region %d vs %-26s %s"
-                  % (idx, ref, prove("%s/gold.json" % workdir,
-                                     "%s/gate.json" % workdir, workdir,
-                                     "prove_%d_%s" % (idx, ref))))
+            verdict = prove("%s/gold.json" % workdir, "%s/gate.json" % workdir,
+                            workdir, "prove_%d_%s" % (index, refname))
+            print("      vs %-26s %s" % (refname, verdict))
+            if verdict == "PROVEN EQUIVALENT":
+                found[str(index)] = {"module": refsig["module"],
+                                     "built": refname, "width": width,
+                                     "kind": kind}
+                break
 
+    design = os.path.basename(netlist)
+    for tail in ("_generic.json", "_faithful.json", ".json"):
+        if design.endswith(tail):
+            design = design[:-len(tail)]
+            break
+    out = "%s/%s_matches.json" % (outdir, design)
+    json.dump(found, open(out, "w"), indent=1, sort_keys=True)
+    print("  %d of %d regions are a library module -> %s"
+          % (len(found), len(regions), out))
+
+    chains = [(i, p, n, region_wiring(r)) for i, p, n, r in chains]
+    chains = [(i, p, n, w) for i, p, n, w in chains if w]
     for a in range(len(chains) - 1):
-        ia, pa, ma, ra, _ = chains[a]
-        ib, pb, mb, rb, _ = chains[a + 1]
-        wa, wb = region_wiring(ra), region_wiring(rb)
-        if wa is None or wb is None:
-            continue
+        ia, pa, ma, wa = chains[a]
+        ib, pb, mb, wb = chains[a + 1]
         ca, wa, da, _ = wa
         cb, wb, db, _ = wb
         if canonicalise(pa, ma, ca, wa, "gold", workdir, da) and \
