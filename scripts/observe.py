@@ -153,7 +153,7 @@ def rename(text, table):
     aside = {}
     for at, old in enumerate(table):
         aside[old] = "minos$%d" % at
-        text = re.sub(r"\b%s(?=\b|_)" % re.escape(old), aside[old], text)
+        text = re.sub(r"(?<![\w'])%s(?=\b|_)" % re.escape(old), aside[old], text)
     for old, new in table.items():
         text = text.replace(aside[old], new)
     return text

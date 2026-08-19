@@ -187,6 +187,12 @@ corpus: deps
 # The same simulator is what names a register, since the layout carries no
 # name out of the foundry and watching one is the only honest way to say what
 # it is for. Naming comes before the comparison so the comparison covers it.
+#
+# A model is asked last and only when one is named, since it is the one step
+# here that guesses. What it says about a net is worth having where a run
+# never reached one, and worth less than a run wherever a run did, so it is
+# offered only the nets nothing else has named. Setting MINOS_MODEL turns it
+# on; without it the flow runs as it always has, which is the point.
 .PHONY: lift
 lift:
 	YOSYS="$(YOSYS)" $(PYTHON) $(SCRIPTS)/lift.py \
@@ -198,6 +204,9 @@ lift:
 	IVERILOG="$(IVERILOG)" VVP="$(VVP)" \
 		$(PYTHON) $(SCRIPTS)/observe.py $(WORKDIR)/$(DESIGN)_generic.json \
 		$(WORKDIR)/$(DESIGN)_lifted.sv $(WORKDIR)
+	@[ -n "$(MINOS_MODEL)" ] || exit 0; \
+	MINOS_MODEL="$(MINOS_MODEL)" \
+		$(PYTHON) $(SCRIPTS)/infer.py $(WORKDIR)/$(DESIGN)_lifted.sv
 	@YOSYS="$(YOSYS)" IVERILOG="$(IVERILOG)" VVP="$(VVP)" \
 		$(PYTHON) $(SCRIPTS)/cosim.py $(WORKDIR)/$(DESIGN)_generic.json \
 		$(WORKDIR)/$(DESIGN)_lifted.sv $(WORKDIR)
