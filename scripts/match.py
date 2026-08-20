@@ -33,9 +33,12 @@ SIZING = re.compile(r"(?i)width|depth|size|num|indices")
 # built from, so they are not offered.
 INNER = re.compile(r"_[0-9A-F]{5}(?:_[0-9A-F]{5})*$")
 
-# How wide a library module is worth building. Nothing in the corpus holds
-# more than a few tens of bits in one region, and the search below is over the
-# parameter, not over this, so a generous ceiling costs a few seconds once.
+# How far the search for a parameter may go. A ceiling below the region being
+# matched is not a ceiling but a wrong answer: the puzzle's eighty bit group
+# was reported as having nothing to try at all, when what had happened was
+# that no reference had been allowed to grow wide enough to hold it. So the
+# region sets it, and this is only the floor, for the modules whose parameter
+# counts something rather than sizing it and has to run well past the width.
 WIDEST = int(os.environ.get("MINOS_CC_WIDEST", "64"))
 
 
@@ -654,10 +657,13 @@ def fitted(source, module, param, width, libdir, workdir):
 
     A module's width grows with its parameter but not in step with it, and
     writing that relation down for each would be one more thing to keep true
-    as the library grows, so it is searched for by halving. Six builds settle
-    any width up to sixty four, and each is paid once for the whole corpus.
+    as the library grows, so it is searched for by halving. Seven builds settle
+    any width the corpus has, and each is paid once for the whole of it. The
+    search runs at least as far as the region is wide, or a region wider than
+    the ceiling is reported as having nothing worth trying rather than as
+    having been failed to reach.
     """
-    low, high = 1, WIDEST
+    low, high = 1, max(WIDEST, width)
     while low <= high:
         mid = (low + high) // 2
         name, path = elaborate(source, module, param, mid, libdir, workdir)
