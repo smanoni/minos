@@ -526,7 +526,39 @@ def demand(items):
     return counts
 
 
-def arrange(defs, blocks, proven=()):
+def prune(defs, blocks, proven, keep):
+    """Definitions nothing goes on to read, dropped.
+
+    A region lifted into a template leaves the gates that used to feed its
+    registers with nothing reading them. The template was matched against the
+    netlist and wires itself to the netlist's own nets, so the muxes it stands
+    in for are still written out and then never mentioned again: sixteen of
+    warmup's seventeen net definitions are that, and the file reads as three
+    lines of design followed by sixteen of debris.
+
+    A port is kept however little reads it, being what the module is for.
+    Dropping one definition can orphan the one above it, so this runs until
+    nothing more falls.
+    """
+    def touches(lines):
+        return set(BASE.findall("\n".join(lines)))
+
+    outer = set(keep)
+    for lines in list(blocks) + list(proven):
+        outer |= touches(lines)
+
+    kept = list(defs)
+    while True:
+        live = set(outer)
+        for lines, name in kept:
+            live |= touches(lines) - {BASE.match(name).group(0)}
+        left = [(l, n) for l, n in kept if BASE.match(n).group(0) in live]
+        if len(left) == len(kept):
+            return kept
+        kept = left
+
+
+def arrange(defs, blocks, proven=(), keep=()):
     """The lines put in the order that asks least of a reader.
 
     A reader meeting n565 has to carry it until the last place it is read, and
@@ -547,6 +579,7 @@ def arrange(defs, blocks, proven=()):
     def touches(lines):
         return set(BASE.findall("\n".join(lines)))
 
+    defs = prune(defs, blocks, proven, keep)
     items = [(lines, BASE.match(name).group(0), touches(lines))
              for lines, name in defs]
     items += [(lines, None, touches(lines)) for lines in blocks]
@@ -917,7 +950,17 @@ def transcribe(path, skip, alias, label=None, proven=()):
                        "    if (%s%s) %s <= 1'b%s;"
                        % ("!" if redge == "negedge" else "", rst, reg, value),
                        "    else"] + moves("      ", reg, data))
-    return wires, arrange(defs, blocks, proven), taken
+    # What the caller will wire the module's ports up to, once this returns.
+    # Those lines are added after this text is laid out, so nothing here sees
+    # them read anything, and a net driving an output would be pruned as dead
+    # and then referred to by a wire that no longer exists.
+    keep = set(module.get("ports", {}))
+    keep |= {BASE.match(str(n)).group(0) for n in named.values()}
+    keep |= {BASE.match(str(n)).group(0) for n in label.values()}
+    for spec in module.get("ports", {}).values():
+        for bit in spec["bits"]:
+            keep.add(BASE.match(show(bit)).group(0))
+    return wires, arrange(defs, blocks, proven, keep), taken
 
 
 def net_of(path, name):
