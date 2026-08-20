@@ -539,15 +539,22 @@ DRIVEN = re.compile(r"^\s*(\w+)\s*<=")
 
 
 def spans(module, wires, proven):
-    """How wide each name is, from wherever it was declared"""
+    """How each name was declared: the span to repeat, and how many bits.
+
+    The span is carried as it was written rather than worked out again from
+    the count. A one bit region is declared [0:0] and indexed [0], and given
+    back as a plain scalar it cannot be indexed at all.
+    """
     wide = {}
     for name, spec in module.get("ports", {}).items():
-        wide[name] = len(spec["bits"])
+        many = len(spec["bits"])
+        wide[name] = ("" if many == 1 else "[%d:0] " % (many - 1), many)
     for line in list(wires) + [one for piece in proven for one in piece]:
         got = DECL.match(line)
         if got:
             hi, lo, name = got.groups()
-            wide[name] = 1 if hi is None else abs(int(hi) - int(lo)) + 1
+            wide[name] = (("" if hi is None else "[%s:%s] " % (hi, lo)),
+                          1 if hi is None else abs(int(hi) - int(lo)) + 1)
     return wide
 
 
@@ -570,25 +577,27 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
     inside is exactly what a module is.
 
     Not every group is one. A group is taken only if it is long enough to be
-    worth naming, narrow enough at its interface to have said something by
-    being separate, and owns outright every net it drives: a word half driven
-    here and half there cannot be split without two modules driving one wire.
+    worth naming and narrow enough at its interface to have said something by
+    being separate. What it cannot take goes on without it: a net driven from
+    two groups at once, or a port it drives only part of, stays where it was
+    rather than costing the whole group its module.
     """
-    items, heads = [], []
+    kinds, items, heads = [], [], []
     for lines, name in defs:
-        items.append((lines, BASE.match(name).group(0)))
+        kinds.append(0); items.append(lines)
         heads.append(BASE.match(name).group(0))
     for lines in blocks:
-        items.append((lines, None))
-        heads.append(held(lines))
+        kinds.append(1); items.append(lines); heads.append(held(lines))
+    for lines in proven:
+        kinds.append(2); items.append(lines); heads.append(made(lines))
     if not items:
-        return defs, blocks, [], wires
+        return defs, blocks, proven, [], wires
 
     def touches(lines):
         return set(BASE.findall("\n".join(lines)))
 
-    reads = [touches(lines) for lines, _ in items]
-    label = sections([(items[at][0], items[at][1], reads[at])
+    reads = [touches(lines) for lines in items]
+    label = sections([(items[at], heads[at], reads[at])
                       for at in range(len(items))])
 
     where, shared = {}, set()
@@ -598,84 +607,102 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
         if name in where and where[name] != label[at]:
             shared.add(name)
         where[name] = label[at]
-    outside = set(keep) | touches([one for piece in proven for one in piece])
 
-    # A line driving one of the module's own ports is the wiring of that
-    # port and not logic of its own. It stays where the port is declared:
-    # taken inside, the module would export a whole port while driving a few
-    # bits of it, and the bits driven out here would have two drivers.
     members = {}
     for at, one in enumerate(label):
-        if heads[at] in set(ports):
-            continue
         members.setdefault(one, []).append(at)
+
+    # A module's own port can be driven from inside a section, but only if the
+    # section drives the whole of it: exporting a port while driving four of
+    # its eight bits leaves the other four with two drivers.
+    port = set(ports)
+    reach = {}
+    for at, name in enumerate(heads):
+        if name in port:
+            reach.setdefault(name, []).append(at)
+    entire = {}
+    for name, at_list in reach.items():
+        if len(set(label[at] for at in at_list)) != 1:
+            continue
+        bits = set()
+        for at in at_list:
+            for line in items[at]:
+                bits |= {int(b) for b in
+                         re.findall(r"\b%s\[(\d+)\]" % re.escape(name), line)}
+                if re.search(r"assign\s+%s\s*=" % re.escape(name), line):
+                    bits |= set(range(wide.get(name, ("", 1))[1]))
+        if bits == set(range(wide.get(name, ("", 1))[1])):
+            entire[name] = label[at_list[0]]
 
     mods, taken, out, sends = [], set(), [], set()
     for one in sorted(members):
-        group = members[one]
-        drives = set(heads[at] for at in group if heads[at])
-        if drives & shared:
+        group = [at for at in members[one]
+                 if heads[at] not in shared
+                 and (heads[at] not in port or entire.get(heads[at]) == one)]
+        if not group:
             continue
-        length = sum(len(items[at][0]) for at in group)
+        drives = set(heads[at] for at in group if heads[at])
+        length = sum(len(items[at]) for at in group)
         if length < PIECE:
             continue
-        # Read anywhere else, or by a port, and the net leaves the module.
+        home = set(group)
         elsewhere = set()
-        for at, name in enumerate(heads):
-            if label[at] != one:
+        for at in range(len(items)):
+            if at not in home:
                 elsewhere |= reads[at]
-        outs = sorted(n for n in drives if n in elsewhere or n in outside)
-        ins = set()
-        for at in group:
-            for name in reads[at]:
-                if name in drives or name in KEYWORD:
-                    continue
-                if name in where or name in wide:
-                    ins.add(name)
-        ins = sorted(ins)
+        outs = sorted(n for n in drives if n in elsewhere or n in keep)
+        ins = sorted(n for at in group for n in reads[at]
+                     if n not in drives and n not in KEYWORD
+                     and (n in where or n in wide))
+        ins = sorted(set(ins))
         pins = len(ins) + len(outs)
         if pins > PINS or pins == 0 or length < PER_PIN * pins:
             continue
 
-        name = "%s_part%d" % (top, len(mods))
-        held_here = {n for n in drives if n not in outs}
-        body, moved = [], []
-        for line in wires:
+        # What a name was declared as out here it stays inside: a register
+        # that leaves the section is its output register, a wire its output.
+        was = {}
+        for line in list(wires) + [l for at in group for l in items[at]]:
             got = DECL.match(line)
             if got and got.group(3) in drives:
-                moved.append(line)
-                if got.group(3) in held_here:
-                    body.append(line)
+                was[got.group(3)] = "reg" if line.strip().startswith("reg") \
+                                    else "wire"
+
+        name = "%s_part%d" % (top, len(mods))
         text = ["module %s(%s);" % (name, ", ".join(ins + outs))]
         for pin in ins:
-            text.append("  input %s%s;" % (span_of(wide.get(pin, 1)), pin))
+            text.append("  input %s%s;" % (wide.get(pin, ("", 1))[0], pin))
         for pin in outs:
-            kind = "output reg" if any(DECL.match(l) and
-                                       l.strip().startswith("reg") and
-                                       DECL.match(l).group(3) == pin
-                                       for l in moved) else "output"
-            text.append("  %s %s%s;" % (kind, span_of(wide.get(pin, 1)), pin))
-        text += [""] + body
+            text.append("  %s %s%s;"
+                        % ("output reg" if was.get(pin) == "reg" else "output",
+                           wide.get(pin, ("", 1))[0], pin))
+        text.append("")
+        for line in wires:
+            got = DECL.match(line)
+            if got and got.group(3) in drives and got.group(3) not in outs:
+                text.append(line)
         for at in group:
-            text += items[at][0]
+            for line in items[at]:
+                got = DECL.match(line)
+                if got and got.group(3) in outs and "=" not in line:
+                    continue
+                text.append(line)
         text += ["endmodule", ""]
         mods.append(text)
         sends |= set(outs)
-        taken |= set(group)
+        taken |= home
         out.append(["  %s u_part%d(%s);"
                     % (name, len(mods) - 1,
                        ", ".join(".%s(%s)" % (p, p) for p in ins + outs))])
 
     if not mods:
-        return defs, blocks, [], wires
+        return defs, blocks, proven, [], wires
 
-    # A net an instance drives is no longer a register of this module, and a
-    # declaration that moved inside one is not repeated out here.
     gone = set()
-    for text in mods:
-        for line in text:
+    for at in taken:
+        for line in items[at]:
             got = DECL.match(line)
-            if got and not line.strip().startswith(("input", "output")):
+            if got and got.group(3) not in sends:
                 gone.add(got.group(3))
     left = []
     for line in wires:
@@ -687,15 +714,32 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
         if got and got.group(3) in sends and line.strip().startswith("reg"):
             line = line.replace("reg", "wire", 1)
         left.append(line)
+    for pin in sorted(sends):
+        if not any(DECL.match(l) and DECL.match(l).group(3) == pin
+                   for l in left) and pin not in set(ports):
+            left.append("  wire %s%s;" % (wide.get(pin, ("", 1))[0], pin))
 
-    kept_defs = [d for at, d in enumerate(defs) if at not in taken]
-    kept_blocks = [b for at, b in enumerate(blocks)
-                   if at + len(defs) not in taken]
-    return kept_defs, kept_blocks + out, mods, left
+    kept = {0: [], 1: [], 2: []}
+    for at in range(len(items)):
+        if at in taken:
+            continue
+        kept[kinds[at]].append(at)
+    return ([defs[at] for at in kept[0]],
+            [items[at] for at in kept[1]] + out,
+            [items[at] for at in kept[2]], mods, left)
 
 
-def span_of(width):
-    return "" if width <= 1 else "[%d:0] " % (width - 1)
+def made(lines):
+    """The net a recovered region drives, which is what it defines"""
+    for line in lines:
+        got = DRIVEN.match(line) or re.match(r"^\s*assign\s+(\w+)", line)
+        if got:
+            return got.group(1)
+    for line in lines:
+        got = DECL.match(line)
+        if got:
+            return got.group(3)
+    return None
 
 
 KEYWORD = set("wire reg assign always posedge negedge if else begin end "
@@ -1138,9 +1182,9 @@ def transcribe(path, skip, alias, label=None, proven=()):
             keep.add(BASE.match(show(bit)).group(0))
     defs = prune(defs, blocks, proven, keep)
     top = list(json.load(open(path))["modules"])[0]
-    defs, blocks, mods, wires = split(defs, blocks, proven, keep, wires,
-                                      spans(module, wires, proven), top,
-                                      set(module.get("ports", {})))
+    defs, blocks, proven, mods, wires = split(
+        defs, blocks, proven, keep, wires,
+        spans(module, wires, proven), top, set(module.get("ports", {})))
     return wires, arrange(defs, blocks, proven, keep), taken, mods
 
 
