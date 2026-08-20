@@ -986,6 +986,43 @@ def declare(lines, ports, rest=()):
     return ["  wire %s;" % n for n in sorted(used - known)]
 
 
+def instance(hit, reg, role):
+    """A library module wired up in place of the body it proved equal to.
+
+    What a region proved equivalent to says more than any name the flow can
+    invent for it, and says it with a proof behind it, so where there is one
+    the module is named rather than written out. What the reference offers and
+    the design never drove is tied off, exactly as it was tied off to prove it.
+    """
+    args = []
+    for port in sorted(hit["wired"]):
+        slot = hit["wired"][port]
+        if slot == "":
+            args.append(".%s()" % port)
+        elif slot == "q":
+            args.append(".%s(%s)" % (port, reg))
+        elif slot.startswith("c[") and slot.endswith("]"):
+            args.append(".%s(%s)" % (port, role.get("c" + slot[2:-1], "1'b1")))
+        else:
+            args.append(".%s(%s)" % (port, role.get(slot, slot)))
+    head = "  %s #(.%s(%d)) u_%s (" % (hit["module"], hit["param"],
+                                       hit["value"], reg)
+    return ["  wire [%d:0] %s;" % (hit["width"] - 1, reg), head] + \
+        ["      %s%s" % (a, "," if at < len(args) - 1 else "")
+         for at, a in enumerate(args)] + ["  );"]
+
+
+def proven_matches(netlist, outdir):
+    """What a run of match.py proved this design's regions to be"""
+    design = os.path.basename(netlist)
+    for tail in ("_generic.json", "_faithful.json", ".json"):
+        if design.endswith(tail):
+            design = design[:-len(tail)]
+            break
+    path = "%s/%s_matches.json" % (outdir, design)
+    return json.load(open(path)) if os.path.exists(path) else {}
+
+
 def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
     """Assembles the proven pieces into one readable module"""
     design = json.load(open(netlist))
@@ -1019,6 +1056,11 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
               % index)
         del banks[index], names[index]
 
+    matched = proven_matches(netlist, os.path.dirname(out) or ".")
+    source = "%s/tmp/common_cells.v" % (os.path.dirname(out) or ".")
+    if not os.path.exists(source):
+        matched = {}
+    library = []
     # Each recovered region is one piece, kept whole. Where the pieces go is
     # not settled here: they read gates that are written down further on, and
     # the arranger weighs putting them first against putting them among the
@@ -1040,6 +1082,11 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
         proven.append(piece)
     for index, info in sorted(states.items()):
         reg = names[index]
+        hit = matched.get(str(index))
+        if hit:
+            proven.append(instance(hit, reg, roles[index]))
+            library += match.needs(source, hit["module"])
+            continue
         piece = ["  reg [%d:0] %s;" % (info["width"] - 1, reg)]
         piece += count_body(info["width"], info["clear"], info["en"],
                             info["updown"], info["step"], reg, roles[index],
@@ -1069,7 +1116,18 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
     rest = leftover(netlist, regions, chains, states, banks, cones, paths,
                     names, lines, proven)
     lines = head + declare(lines, ports, rest) + rest
-    open(out, "w").write("\n".join(lines + ["endmodule", ""]))
+    tail = ["endmodule", ""]
+    if library:
+        seen, keep = set(), []
+        for body in library:
+            name = re.match(r"module (\S+)", body).group(1)
+            if name not in seen:
+                seen.add(name)
+                keep.append(body)
+        tail += ["// Proved equivalent to the regions instantiated above, and",
+                 "// carried here so the design still reads and still runs.",
+                 ""] + "\n".join(keep).splitlines() + [""]
+    open(out, "w").write("\n".join(lines + tail))
     return out
 
 

@@ -46,8 +46,12 @@ def registers(lifted):
     into; skipping those quietly leaves a module unstarted and holding no
     value, which then disagrees with everything and reads as a design that
     differs rather than as a run that never began.
+
+    Only the design's own module is read. A file may carry a library module it
+    instantiates, and what that holds is neither reachable by this name nor
+    anything the design declared.
     """
-    text = open(lifted).read()
+    text = open(lifted).read().split("\nendmodule")[0]
     got = [(name, int(width) + 1 if width else 1)
            for width, name in DECL.findall(text)]
     return got if len(got) == len(ANY_DECL.findall(text)) else None

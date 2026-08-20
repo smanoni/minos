@@ -21,19 +21,17 @@ YOSYS = os.environ.get("YOSYS", "yosys")
 TIMEOUT = int(os.environ.get("MINOS_TIMEOUT", "300"))
 FLOP = "DFF"
 
-# The library, as modules and the parameter that sizes each, rather than as
-# modules already built at some width. A design's counter is as wide as it is,
-# and a library held at one width matches nothing but designs that happen to
-# share it: the corpus has a 26 bit counter and a library built at 8 never had
-# anything to offer it.
-LIBRARY = [
-    ("cc_counter", "Width"),
-    ("cc_shift_register", "Depth"),
-    ("cc_lfsr_8bit", "Width"),
-    ("cc_popcount", "InputWidth"),
-    ("cc_gray_to_binary", "Width"),
-    ("cc_binary_to_gray", "Width"),
-]
+# What in a parameter's name says it sizes the module. A module is worth
+# trying at a region's width only if something about it can be set to that
+# width, and the rest of what a library module takes is behaviour rather than
+# size.
+SIZING = re.compile(r"(?i)width|depth|size|num|indices")
+
+# sv2v writes one copy of a module per set of type parameters it was
+# instantiated with, and names the copies after a hash. Those are inner
+# workings of the modules that used them, not anything a design would be
+# built from, so they are not offered.
+INNER = re.compile(r"_[0-9A-F]{5}(?:_[0-9A-F]{5})*$")
 
 # How wide a library module is worth building. Nothing in the corpus holds
 # more than a few tens of bits in one region, and the search below is over the
@@ -565,6 +563,56 @@ def compatible(region, ref):
     return ref["flops"] >= region["flops"]
 
 
+def library(source):
+    """Every module in the library that something about it can size.
+
+    Held as a list once, this was six modules somebody had thought of. Read
+    off the source it is every one there is, which is the difference between
+    asking whether a design uses the modules we guessed at and asking whether
+    it uses any of them.
+    """
+    text = open(source).read()
+    out = []
+    for name, params in re.findall(
+            r"^module (cc_[A-Za-z0-9_]+) \([^;]*?\);\n((?:\tparameter[^\n]*\n)*)",
+            text, re.M):
+        if INNER.search(name):
+            continue
+        for one in re.findall(
+                r"parameter(?: signed| \[[^\]]*\])? ([A-Za-z_][A-Za-z0-9_]*) = ",
+                params):
+            if SIZING.search(one):
+                out.append((name, one))
+                break
+    return out
+
+
+def needs(source, module):
+    """A library module's own text and every module it stands on.
+
+    Instantiating one is only readable if what it names can still be read and
+    still be simulated, so what a lifted design uses is carried in it rather
+    than left as a reference to a file somebody has to find.
+    """
+    text = open(source).read()
+    bodies, want, out = {}, [module], []
+    for got in re.finditer(r"^module ([A-Za-z_][A-Za-z0-9_]*) \(.*?^endmodule",
+                           text, re.M | re.S):
+        bodies[got.group(1)] = got.group(0)
+    seen = set()
+    while want:
+        name = want.pop(0)
+        if name in seen or name not in bodies:
+            continue
+        seen.add(name)
+        out.append(bodies[name])
+        for inner in re.findall(r"^\t([A-Za-z_][A-Za-z0-9_]*) (?:#\(|i_)",
+                                bodies[name], re.M):
+            if inner in bodies and inner not in seen:
+                want.append(inner)
+    return out
+
+
 def elaborate(source, module, param, value, libdir, workdir):
     """One library module built at one parameter value, kept once it is built.
 
@@ -576,6 +624,11 @@ def elaborate(source, module, param, value, libdir, workdir):
     path = "%s/%s.json" % (libdir, name)
     if os.path.exists(path):
         return name, path
+    # A module that will not build at a width will not build at it next time
+    # either, and there are enough of them that retrying would cost more than
+    # the whole search.
+    if os.path.exists(path + ".no"):
+        return None, None
     script = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "cc_lib.ys")).read()
     for was, now in (("IN_V", source),
@@ -585,6 +638,7 @@ def elaborate(source, module, param, value, libdir, workdir):
         script = script.replace(was, now)
     code, log = yosys(script.strip().split("\n"), "%s/%s.ys" % (workdir, name))
     if code or not os.path.exists(path):
+        open(path + ".no", "w").write("")
         return None, None
     return name, path
 
@@ -611,7 +665,7 @@ def fitted(source, module, param, width, libdir, workdir):
             return None
         got = signature(path)
         if widest(got) == width:
-            return name, path, got
+            return name, path, got, mid
         if widest(got) < width:
             low = mid + 1
         else:
@@ -627,10 +681,10 @@ def library_for(source, width, flops, libdir, workdir):
     into a port per bit, so its widest port is one however wide the word is.
     """
     out = []
-    for module, param in LIBRARY:
+    for module, param in library(source):
         got = fitted(source, module, param, width, libdir, workdir)
         if got and got[2]["flops"] >= flops:
-            out.append(got)
+            out.append(got + (param,))
     return out
 
 
@@ -676,7 +730,7 @@ def main(netlist, regions_path, libdir, outdir):
         tried = library_for(source, width, sig["flops"], libdir, workdir)
         print("  region %d (%s)  %d wide, %d registers, %d to try"
               % (index, kind, width, sig["flops"], len(tried)))
-        for refname, refpath, refsig in tried:
+        for refname, refpath, refsig, value, param in tried:
             wired = (ref_state_wiring(refpath, refsig["module"], width, cwidth)
                      if kind == "state"
                      else ref_wiring(refpath, refsig["module"], width))
@@ -691,7 +745,8 @@ def main(netlist, regions_path, libdir, outdir):
             if verdict == "PROVEN EQUIVALENT":
                 found[str(index)] = {"module": refsig["module"],
                                      "built": refname, "width": width,
-                                     "kind": kind}
+                                     "kind": kind, "param": param,
+                                     "value": value, "wired": wired}
                 break
 
     design = os.path.basename(netlist)
