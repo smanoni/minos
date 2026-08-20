@@ -646,37 +646,80 @@ def elaborate(source, module, param, value, libdir, workdir):
     return name, path
 
 
-def fitted(source, module, param, width, libdir, workdir):
-    """The parameter at which a library module puts out as wide a word.
+def deep(sig):
+    """How much state a module holds, which is what a depth sizes"""
+    return sig["flops"]
 
-    Width is the thing that has to agree: a design's counter is as wide as it
-    is, and a reference narrower than it cannot hold what it holds however
-    many registers it has. Register counts are not the key, because they need
-    not agree at all — a library counter keeps an overflow bit that a design
-    which never needed one does not.
 
-    A module's width grows with its parameter but not in step with it, and
-    writing that relation down for each would be one more thing to keep true
-    as the library grows, so it is searched for by halving. Seven builds settle
-    any width the corpus has, and each is paid once for the whole of it. The
-    search runs at least as far as the region is wide, or a region wider than
-    the ceiling is reported as having nothing worth trying rather than as
-    having been failed to reach.
+def sizing(source, module, param, libdir, workdir):
+    """Which measure of a library module its own parameter actually moves.
+
+    A parameter is a width for some modules and a depth for others, and the
+    two are not interchangeable: a shift register built deeper still puts out
+    one bit, so looking for it by the width of its output finds it at no depth
+    at all. Rather than keep a list of which is which, each module is built at
+    two sizes once and asked what changed. Ten of the library's modules are
+    depths, and before this they could not be reached however wide a region
+    was.
     """
-    low, high = 1, max(WIDEST, width)
+    seen = []
+    for value in (2, 8):
+        name, path = elaborate(source, module, param, value, libdir, workdir)
+        if path is None:
+            return None
+        seen.append(signature(path))
+    if widest(seen[0]) != widest(seen[1]):
+        return widest
+    if deep(seen[0]) != deep(seen[1]):
+        return deep
+    return None
+
+
+def sized(source, module, param, want, key, libdir, workdir):
+    """The parameter at which one measure of a library module reaches a size.
+
+    A module grows with its parameter but not in step with it, and writing
+    that relation down for each would be one more thing to keep true as the
+    library grows, so it is searched for by halving. Seven builds settle any
+    size the corpus has, and each is paid once for the whole of it. The search
+    runs at least as far as the region asks, or a region past the ceiling is
+    reported as having nothing worth trying rather than as having been failed
+    to reach.
+    """
+    low, high = 1, max(WIDEST, want)
     while low <= high:
         mid = (low + high) // 2
         name, path = elaborate(source, module, param, mid, libdir, workdir)
         if path is None:
             return None
         got = signature(path)
-        if widest(got) == width:
+        if key(got) == want:
             return name, path, got, mid
-        if widest(got) < width:
+        if key(got) < want:
             low = mid + 1
         else:
             high = mid - 1
     return None
+
+
+def fitted(source, module, param, width, flops, libdir, workdir):
+    """A library module built to the size a region asks of it.
+
+    Width is what has to agree wherever a parameter is a width: a design's
+    counter is as wide as it is, and a reference narrower than it cannot hold
+    what it holds however many registers it has. Register counts are no key
+    there, because they need not agree at all — a library counter keeps an
+    overflow bit that a design which never needed one does not.
+
+    Where the parameter is a depth there is no width to go on, so the register
+    count is the only size the region and the reference can be matched on, and
+    it is asked for exactly.
+    """
+    key = sizing(source, module, param, libdir, workdir)
+    if key is None:
+        return None
+    return sized(source, module, param,
+                 width if key is widest else flops, key, libdir, workdir)
 
 
 def library_for(source, width, flops, libdir, workdir):
@@ -688,7 +731,7 @@ def library_for(source, width, flops, libdir, workdir):
     """
     out = []
     for module, param in library(source):
-        got = fitted(source, module, param, width, libdir, workdir)
+        got = fitted(source, module, param, width, flops, libdir, workdir)
         if got and got[2]["flops"] >= flops:
             out.append(got + (param,))
     return out
