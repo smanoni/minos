@@ -30,6 +30,17 @@ DECL = re.compile(r"^\s*reg\s+(?:\[(\d+):0\]\s*)?"
                   r"(\\\S+|[A-Za-z_][A-Za-z0-9_$]*)\s*;", re.M)
 ANY_DECL = re.compile(r"^\s*reg\s[^;]*;", re.M)
 
+# A section this flow pulled out into a module of its own, and the name the
+# design instantiates it under. Only these are followed: a library module
+# carried along holds nothing the design declared.
+PART = re.compile(r"^\s*(\w+_part\d+)\s+(u_part\d+)\s*\(", re.M)
+
+# Inside such a module a register that leaves it is declared as its output,
+# so the plain form above does not find it and the register goes unstarted.
+INNER = re.compile(r"^\s*(?:output\s+)?reg\s+(?:\[(\d+):0\]\s*)?"
+                   r"(\\\S+|[A-Za-z_][A-Za-z0-9_$]*)\s*;", re.M)
+ANY_INNER = re.compile(r"^\s*(?:output\s+)?reg\s[^;]*;", re.M)
+
 
 def registers(lifted):
     """Every register a module declares, with how wide it is.
@@ -51,10 +62,29 @@ def registers(lifted):
     instantiates, and what that holds is neither reachable by this name nor
     anything the design declared.
     """
-    text = open(lifted).read().split("\nendmodule")[0]
+    whole = open(lifted).read()
+    text = whole.split("\nendmodule")[0]
     got = [(name, int(width) + 1 if width else 1)
            for width, name in DECL.findall(text)]
-    return got if len(got) == len(ANY_DECL.findall(text)) else None
+    if len(got) != len(ANY_DECL.findall(text)):
+        return None
+    # A section written as a module of its own is still this design's state,
+    # and a testbench reaches it through the instance. Left out, those
+    # registers start at no value and the run reads as a design that differs
+    # rather than as one that was never started.
+    bodies = {}
+    for part in re.split(r"^module ", whole, flags=re.M)[1:]:
+        bodies[part.split("(")[0].strip()] = part.split("\nendmodule")[0]
+    for kind, tag in PART.findall(text):
+        body = bodies.get(kind)
+        if body is None:
+            continue
+        inner = [(name, int(width) + 1 if width else 1)
+                 for width, name in INNER.findall(body)]
+        if len(inner) != len(ANY_INNER.findall(body)):
+            return None
+        got += [("%s.%s" % (tag, name), width) for name, width in inner]
+    return got
 
 
 def pin_bits(module, pin):
@@ -112,6 +142,17 @@ def span(width):
     return "" if width == 1 else "[%d:0] " % (width - 1)
 
 
+def safe(name):
+    """A name a testbench can declare a shadow of.
+
+    A register inside a section of its own is reached as u_part0.n325, and a
+    register the netlist escaped is written \\U1776.IQ. Neither can stand in
+    the middle of a local identifier, so the shadow this bench keeps beside
+    each register is named from the same letters with nothing else in them.
+    """
+    return re.sub(r"[^0-9A-Za-z_$]", "_", name).lstrip("_") or "reg"
+
+
 def bench(top, clk, rst, data, out, level, cycles, held=(),
           start=()):
     """A testbench driving both modules from one clock and one stimulus.
@@ -148,8 +189,8 @@ def bench(top, clk, rst, data, out, level, cycles, held=(),
         lines += ["  wire %s%s_ref, %s_dut;" % (span(width), name, name),
                   "  reg %s%s_was;" % (span(width), name)]
     for name, width in held:
-        lines += ["  reg %s%s_seen = %d'd0;" % (span(width), name, width),
-                  "  reg %s%s_last;" % (span(width), name)]
+        lines += ["  reg %s%s_seen = %d'd0;" % (span(width), safe(name), width),
+                  "  reg %s%s_last;" % (span(width), safe(name))]
     every = clk + rst + data
     wire = lambda tag: ", ".join(
         [".%s(%s)" % (n, n) for n, _ in every]
@@ -171,12 +212,12 @@ def bench(top, clk, rst, data, out, level, cycles, held=(),
                   % (name, name),
                   "      %s_was = %s_ref;" % (name, name)]
     for name, width in held:
-        one = "u_dut.%s" % name
+        one, tag = "u_dut.%s" % name, safe(name)
         lines += ["      if ((%s ^ %s) === %d'd0 && (%s_last ^ %s_last) === "
-                  "%d'd0)" % (one, one, width, name, name, width),
+                  "%d'd0)" % (one, one, width, tag, tag, width),
                   "        %s_seen = %s_seen | (%s ^ %s_last);"
-                  % (name, name, one, name),
-                  "      %s_last = %s;" % (name, one)]
+                  % (tag, tag, one, tag),
+                  "      %s_last = %s;" % (tag, one)]
     lines += ["      if (hit) bad = bad + 1;", "    end",
               "  endtask", "  initial begin"]
     # A design with no reset starts at no value at all and stays there, and
@@ -199,7 +240,8 @@ def bench(top, clk, rst, data, out, level, cycles, held=(),
                         "1" if level == "0" else "0"))
     lines += ["      #17 compare;", "      #1;", "    end"]
     total = sum(width for _, width in held)
-    stirred = " + ".join("$countones(%s_seen)" % name for name, _ in held)
+    stirred = " + ".join("$countones(%s_seen)" % safe(name)
+                         for name, _ in held)
     lines += ["    stirred = %s;" % (stirred or "0"),
               "    if (bad != 0) $display(\"  %0d of %0d cycles differ\","
               " bad, i);",
