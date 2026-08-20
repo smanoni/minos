@@ -1113,10 +1113,16 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
                           slice_of(info["b"]))])
     proven += [[one] for one in output_wiring(ports, chains, names)]
     lines = [one for piece in proven for one in piece]
-    rest = leftover(netlist, regions, chains, states, banks, cones, paths,
-                    names, lines, proven)
+    rest, mods = leftover(netlist, regions, chains, states, banks, cones,
+                          paths, names, lines, proven)
     lines = head + declare(lines, ports, rest) + rest
     tail = ["endmodule", ""]
+    if mods:
+        print("  %d sections stand as modules of their own" % len(mods))
+        tail += ["// Sections of this design whose nets mostly stay inside",
+                 "// them, written as modules so the hierarchy synthesis",
+                 "// flattened reads as hierarchy again.",
+                 ""] + [one for text in mods for one in text]
     if library:
         seen, keep = set(), []
         for body in library:
@@ -1352,9 +1358,9 @@ def leftover(netlist, regions, chains, states, banks, cones, paths,
             if bit not in alias and bit not in label:
                 label[bit] = (name if len(spec["bits"]) == 1
                               else "%s_%d" % (name, i))
-    wires, body, taken = expr.transcribe(netlist, skip, alias, label, proven)
+    wires, body, taken, mods = expr.transcribe(netlist, skip, alias, label, proven)
     if not body:
-        return []
+        return [], []
     driven = set(re.findall(r"assign (\S+?) =", "\n".join(lines)))
     tail = []
     for name, spec in ports.items():
@@ -1371,7 +1377,7 @@ def leftover(netlist, regions, chains, states, banks, cones, paths,
             # wiring it up again would assign the port to itself.
             if one not in driven and source != one:
                 tail.append("  assign %s = %s;" % (one, source))
-    return [""] + wires + [""] + body + tail
+    return [""] + wires + [""] + body + tail, mods
 
 
 def main(netlist, regions_path, outdir, out=None):
