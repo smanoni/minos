@@ -215,6 +215,13 @@ def main(netlist, lifted, outdir):
             table[name] = "%s%d" % (kind, index)
     if table:
         open(lifted, "w").write(rename(text, table))
+    # What each register was called before this pass renamed it, kept beside
+    # the design. Every other pass speaks of a register by the name the lift
+    # gave it, and without this record nothing said earlier can be matched up
+    # with the text a reader is actually handed.
+    record = os.path.join(outdir, "%s_renamed.json"
+                          % os.path.basename(lifted).rsplit("_lifted", 1)[0])
+    json.dump(table, open(record, "w"), indent=1, sort_keys=True)
     # What is reported is what the design is now called, not what this run
     # changed, so looking twice does not read as having found nothing.
     kinds = {}
