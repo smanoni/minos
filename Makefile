@@ -59,6 +59,11 @@ LIBERTY   := $(STDCELLS)/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
 MODELS    := $(STDCELLS)/verilog/primitives.v $(STDCELLS)/verilog/sky130_fd_sc_hd.v
 SIMFLAGS  := -g2012 -DFUNCTIONAL -DUNIT_DELAY=\#1
 
+# What tells the synthesiser what the cells in a netlist do. A layout is read
+# against the PDK's Liberty; a netlist that arrives in some other technology
+# brings its own, and `make netlist` overrides this with Verilog models.
+READ_CELLS ?= read_liberty -ignore_miss_func -ignore_miss_dir $(LIBERTY)
+
 # Reference modules to recognise in a recovered netlist, as module:param=value
 # pairs taken straight from common_cells. `make cc` elaborates each onto the
 # gate basis the recovered netlists use; omitted parameters keep their default.
@@ -136,7 +141,7 @@ puzzle: deps | $(WORKDIR)
 
 .PHONY: generic
 generic: | $(TMPDIR)
-	sed -e 's|LIBERTY|$(LIBERTY)|' \
+	sed -e 's|READ_CELLS|$(READ_CELLS)|' \
 	    -e 's|IN_V|$(WORKDIR)/$(DESIGN).v|' \
 	    -e 's|TOP|$(TOP)|' \
 	    -e 's|LOG|$(TMPDIR)/$(DESIGN)_generic.log|' \
@@ -146,6 +151,22 @@ generic: | $(TMPDIR)
 	    -e 's|OUT_GENERIC_V|$(WORKDIR)/$(DESIGN)_generic.v|' \
 	    $(SCRIPTS)/generic.ys > $(TMPDIR)/$(DESIGN)_generic.ys
 	$(YOSYS) -q -s $(TMPDIR)/$(DESIGN)_generic.ys
+
+# A design that came as a gate netlist rather than as a layout. Reading a
+# layout is what the first two steps of the flow are for, so a netlist joins
+# the flow where they leave off, and everything actually in question is asked
+# of it exactly as it is asked of a layout: which flops belong together, what
+# the logic between them says, where the hierarchy went. What the cells do
+# still has to come from somewhere, and where there is no Liberty file for
+# them the gate library's own description is turned into models first.
+.PHONY: netlist
+netlist: | $(WORKDIR)
+	$(PYTHON) $(SCRIPTS)/hgl2v.py $(HGL) $(WORKDIR)/$(DESIGN)_cells.v
+	cp $(NETLIST) $(WORKDIR)/$(DESIGN).v
+	$(MAKE) generic DESIGN=$(DESIGN) TOP=$(TOP) \
+		READ_CELLS="read_verilog $(WORKDIR)/$(DESIGN)_cells.v"
+	$(MAKE) structure DESIGN=$(DESIGN)
+	$(MAKE) lift DESIGN=$(DESIGN)
 
 .PHONY: structure
 structure:

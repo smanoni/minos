@@ -4,9 +4,10 @@
 #
 # Simone Manoni <simone.manoni2@gmail.com>
 
-read_liberty -ignore_miss_func -ignore_miss_dir LIBERTY
+READ_CELLS
 read_verilog IN_V
-hierarchy -top TOP
+hierarchy -top TOP -purge_lib
+proc
 flatten
 techmap
 opt_clean
