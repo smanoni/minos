@@ -1128,7 +1128,31 @@ def transcribe(path, skip, alias, label=None, proven=()):
         word = "%s%d" % (words.get(key[-1], "word"), len(rows))
         for slot, (_, cell) in enumerate(members):
             named[cell["connections"]["Q"][0]] = "%s[%d]" % (word, slot)
-        rows.append((word, key, members))
+        rows.append((word, key, members, False))
+
+    # A register left standing alone joins the word that shares its clock, its
+    # reset and the condition it moves on, even though what it takes is not
+    # shaped like the rest. Measured against the sources these came from, that
+    # is where our grouping was weakest: I2C declares nineteen registers of one
+    # bit and we were declaring fifty-nine, urish_simon seven against fifty-
+    # eight. The word is then written bit by bit rather than as one row, since
+    # its members no longer say the same thing in different places.
+    home = collections.defaultdict(list)
+    for at, (word, key, members, _) in enumerate(rows):
+        home[key[:-1]].append(at)
+    for key, members in sorted(families.items(), key=lambda f: str(f[0])):
+        if len(members) != 1:
+            continue
+        cell = members[0][1]
+        if cell["connections"]["Q"][0] in named:
+            continue
+        where = home.get(key[:-1])
+        if not where:
+            continue
+        at = min(where, key=lambda i: len(rows[i][2]))
+        word, rkey, held, _ = rows[at]
+        named[cell["connections"]["Q"][0]] = "%s[%d]" % (word, len(held))
+        rows[at] = (word, rkey, held + list(members), True)
 
     # Each operand a row reads takes the row's name and the part it plays, so
     # a column of numbers becomes a word with a name. Only a column that is
@@ -1136,7 +1160,9 @@ def transcribe(path, skip, alias, label=None, proven=()):
     # nets to put the name on, and one the whole row shares is a single net
     # that already answers to itself.
     buses = collections.OrderedDict()
-    for word, key, members in rows:
+    for word, key, members, mixed in rows:
+        if mixed:
+            continue
         grid = [TERM.findall(build(c["connections"]["D"][0], MUX))
                 for _, c in members]
         mine = [show(c["connections"]["Q"][0]) for _, c in members]
@@ -1252,13 +1278,17 @@ def transcribe(path, skip, alias, label=None, proven=()):
                           start),
                        "    else"] + moves("      ", word, data))
 
-    for word, key, members in rows:
+    for word, key, members, mixed in rows:
         edge, clock, redge, rst, value = key[:5]
         wide = len(members)
-        cols = columns(key[-1], [build(c["connections"]["D"][0], MUX)
-                                 for _, c in members],
-                       ["%s[%d]" % (word, i) for i in range(wide)])
-        data = key[-1] % tuple(word if c is None else c for c in cols)
+        if mixed:
+            data = "{%s}" % ", ".join(build(c["connections"]["D"][0], MUX)
+                                      for _, c in reversed(members))
+        else:
+            cols = columns(key[-1], [build(c["connections"]["D"][0], MUX)
+                                     for _, c in members],
+                           ["%s[%d]" % (word, i) for i in range(wide)])
+            data = key[-1] % tuple(word if c is None else c for c in cols)
         wires.append("  reg [%d:0] %s;" % (wide - 1, word))
         if redge is None:
             blocks.append(["  always @(%s %s)" % (edge, clock)]
@@ -1270,7 +1300,7 @@ def transcribe(path, skip, alias, label=None, proven=()):
                           value),
                        "    else"] + moves("      ", word, data))
 
-    grouped = {c["connections"]["Q"][0] for _, _, ms in rows for _, c in ms}
+    grouped = {c["connections"]["Q"][0] for _, _, ms, _ in rows for _, c in ms}
     for name, cell in cells.items():
         if name in skip or FLOP not in cell["type"] or name in worn:
             continue
