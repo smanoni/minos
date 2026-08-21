@@ -1352,6 +1352,18 @@ def transcribe(path, skip, alias, label=None, proven=()):
                        % (level, build(cell["connections"]["E"][0], ATOM),
                           held, build(cell["connections"]["D"][0], MUX))])
 
+    # Which word each flop ended up in, written down beside the design.
+    # A reader only ever sees the name in the text, but anything grading this
+    # pass has to speak of a flop as the netlist names it, and once the text
+    # is written that correspondence cannot be worked out again.
+    if path.endswith("_generic.json"):
+        json.dump({str(cell["connections"]["Q"][0]):
+                   str(named.get(cell["connections"]["Q"][0],
+                                 show(cell["connections"]["Q"][0])))
+                   for cell in cells.values() if FLOP in cell["type"]},
+                  open(path[:-len("_generic.json")] + "_words.json", "w"),
+                  indent=1, sort_keys=True)
+
     # What the caller will wire the module's ports up to, once this returns.
     # Those lines are added after this text is laid out, so nothing here sees
     # them read anything, and a net driving an output would be pruned as dead
