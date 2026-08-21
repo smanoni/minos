@@ -12,6 +12,7 @@ import json
 import collections
 
 FLOP = "DFF"
+LATCH = "DLATCH"
 
 # How tightly each form binds, so that folding one gate into another can tell
 # when the result needs brackets round it. A gate's operands are ranked by the
@@ -293,6 +294,17 @@ def flop_kind(kind):
     if len(tag) < 3:
         return edge, None, None
     return edge, "negedge" if tag[1] == "N" else "posedge", tag[2]
+
+
+def latch_kind(kind):
+    """Reads a generic latch name as the level its enable lets data through on
+
+    The names run $_DLATCH_<level>_, and the variants that also carry a set or
+    a reset are not read here: nothing that writes them has come up, and a
+    latch written wrong is worse than a latch refused.
+    """
+    tag = kind[len("$_DLATCH_"):].rstrip("_")
+    return "" if tag == "P" else "!" if tag == "N" else None
 
 
 def load(path):
@@ -1323,6 +1335,23 @@ def transcribe(path, skip, alias, label=None, proven=()):
                        "    if (%s%s) %s <= 1'b%s;"
                        % ("!" if redge == "negedge" else "", rst, reg, value),
                        "    else"] + moves("      ", reg, data))
+    # A latch, which is not a register and belongs to no region, but which a
+    # synthesiser puts in all the same: a clock gate is a latch and an and
+    # gate. Nothing here tries to read one as anything more than it is.
+    for name, cell in cells.items():
+        if name in skip or LATCH not in cell["type"]:
+            continue
+        level = latch_kind(cell["type"])
+        q = cell["connections"]["Q"][0]
+        if level is None or q in named or q in written:
+            continue
+        held = show(q)
+        wires.append("  reg %s;" % held)
+        blocks.append(["  always @(*)",
+                       "    if (%s%s) %s <= %s;"
+                       % (level, build(cell["connections"]["E"][0], ATOM),
+                          held, build(cell["connections"]["D"][0], MUX))])
+
     # What the caller will wire the module's ports up to, once this returns.
     # Those lines are added after this text is laid out, so nothing here sees
     # them read anything, and a net driving an output would be pruned as dead
