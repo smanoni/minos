@@ -307,6 +307,76 @@ def latch_kind(kind):
     return "" if tag == "P" else "!" if tag == "N" else None
 
 
+def fed_by(cells, driver, ports, home, bit, memo):
+    """The registers and input ports one net is worked out from"""
+    seen, out, queue = set(), set(), [bit]
+    while queue:
+        b = queue.pop()
+        if b in seen:
+            continue
+        seen.add(b)
+        if b in memo:
+            out |= memo[b]
+            continue
+        if b in ports:
+            out.add(ports[b])
+            continue
+        got = driver.get(b)
+        if got is None:
+            continue
+        cell = cells[got[0]]
+        if FLOP in cell["type"] or LATCH in cell["type"]:
+            out.add(home.get(got[0], got[0]))
+            continue
+        queue += [x for port, bits in cell["connections"].items()
+                  if cell["port_directions"].get(port) == "input"
+                  for x in bits]
+    memo[bit] = out
+    return out
+
+
+def apart(families, cells, driver, ports):
+    """Families whose members are loaded from different places, told apart.
+
+    Two registers under one clock, one reset and one condition are still two
+    registers, and nothing about the way they step says so: a block cipher
+    keeps an 80-bit key and a 64-bit block of text that move alike and come
+    back as one 144-bit word. What tells them apart is where they are loaded
+    from, which is the question DANA asks and this one did not.
+
+    A family is only cut where what its members read partitions it outright,
+    every member reading exactly one of the sources the family does not all
+    share. A source that merely most of them read is the ordinary unevenness
+    of a word, and cutting on that takes a register file apart byte by byte.
+    """
+    home, memo, out = {}, {}, collections.OrderedDict()
+    for key, members in families.items():
+        for name, _ in members:
+            home[name] = key
+    for key, members in families.items():
+        if len(members) < 4:
+            out[key] = members
+            continue
+        src = {name: fed_by(cells, driver, ports, home,
+                            cell["connections"]["D"][0], memo)
+               for name, cell in members}
+        shared = set.intersection(*[set(one) for one in src.values()])
+        rest = {name: src[name] - shared for name in src}
+        if any(len(one) != 1 for one in rest.values()):
+            out[key] = members
+            continue
+        blocks = collections.defaultdict(list)
+        for name, cell in members:
+            blocks[next(iter(rest[name]))].append((name, cell))
+        if len(blocks) < 2 or any(len(b) < 2 for b in blocks.values()):
+            out[key] = members
+            continue
+        for at, block in enumerate(sorted(blocks.values(), key=len,
+                                          reverse=True)):
+            out[key[:-1] + (at, key[-1])] = block
+    return out
+
+
 def load(path):
     module = list(json.load(open(path))["modules"].values())[0]
     cells = module["cells"]
@@ -1128,6 +1198,10 @@ def transcribe(path, skip, alias, label=None, proven=()):
         shape = outline(build(cell["connections"]["D"][0], MUX))
         families[sensitivity(cell)
                  + (question(cell, shape), shape)].append((name, cell))
+    families = apart(families, cells, driver,
+                     {bit: "port:" + name
+                      for name, spec in module.get("ports", {}).items()
+                      if spec["direction"] == "input" for bit in spec["bits"]})
     words, rows = dict(IDIOMS), []
     for key, members in sorted(families.items(),
                                key=lambda f: (-len(f[1]), str(f[0]))):
