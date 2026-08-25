@@ -1584,14 +1584,20 @@ def chain_words(chains, roles, names):
     per chain, so eight chains fifteen deep are better left as they are.
     """
     family = collections.defaultdict(list)
+    shape = {}
     for index, info in sorted(chains.items()):
-        if info.get("form") not in (None, "shift") or info["enable"] \
-                or info["clear"]:
+        if info.get("form") not in (None, "shift") or info["enable"]:
             continue
         role = roles.get(index)
         if role is None or info["width"] < 2:
             continue
-        family[(info["width"], info["edges"], role["clk"])].append(index)
+        clear = info["clear"]
+        rst = role.get(clear[0]) if clear else None
+        if clear and rst is None:
+            continue
+        key = (info["width"], info["edges"], role["clk"], str(clear), rst)
+        family[key].append(index)
+        shape[key] = (info["edges"], clear, role)
     out, seat = {}, {}
     for at, key in enumerate(sorted(family, key=str)):
         members = family[key]
@@ -1599,20 +1605,45 @@ def chain_words(chains, roles, names):
             continue
         for slot, index in enumerate(members):
             seat[index] = ("pipe%d_" % at, slot)
-        out["pipe%d_" % at] = (key, members)
+        out["pipe%d_" % at] = (key[0], len(members), shape[key], members)
     return out, seat
 
 
-def word_shift_body(prefix, width, count, clock, feeds, form):
-    """A family of chains as one register per stage, widest end first"""
-    lines = ["  reg [%d:0] %s%d;" % (count - 1, prefix, at)
-             for at in range(width)]
-    lines.append("  always @(%s %s) begin" % (form[0], clock))
-    lines += expr.packed("    %s0 <= {" % prefix, "        ",
-                         list(reversed(feeds)), "};")
-    lines += ["    %s%d <= %s%d;" % (prefix, at, prefix, at - 1)
-              for at in range(1, width)]
-    return lines + ["  end"]
+def word_shift_body(prefix, width, count, shape, feeds):
+    """A family of chains as one register per stage, the newest stage first.
+
+    Each stage is a piece of its own, as every other template is: a piece that
+    drove several registers would be pulled into a section by the first of
+    them and leave the rest named at the top and declared nowhere. Written one
+    apiece they are merged again by whatever merges always blocks, so the
+    reader sees the one block the design wrote.
+
+    The reset arm composes because a stage resets uniformly across the word: a
+    register with a reset pin holds one value in every bit, and a region held
+    at a constant holds that constant's bit for the stage, the same bit for
+    every chain in the family.
+    """
+    form, clear, role = shape
+    out = []
+    for at in range(width):
+        reg = "%s%d" % (prefix, at)
+        piece = ["  reg [%d:0] %s;" % (count - 1, reg),
+                 "  always @(%s)" % sensitivity(role, clear, form)]
+        feed = (expr.packed("%s <= {" % reg, "    ",
+                            list(reversed(feeds)), "};") if at == 0
+                else ["%s <= %s%d;" % (reg, prefix, at - 1)])
+        if clear:
+            piece.append("    if (%s%s) %s <= {%d{1'b%s}};"
+                         % ("!" if clear[1] else "", role[clear[0]], reg,
+                            count, form[2] if clear[2] is None
+                            else clear[2][at]))
+            piece.append("    else " + feed[0])
+            piece += ["    " + one for one in feed[1:]]
+        else:
+            piece.append("    " + feed[0])
+            piece += ["    " + one for one in feed[1:]]
+        out.append(piece)
+    return out
 
 
 def register_names(module, ports, chains, states, banks):
@@ -1663,10 +1694,10 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths,
     # the arranger weighs putting them first against putting them among the
     # logic they read.
     proven = []
-    for prefix, (key, members) in sorted(across.items()):
-        proven.append(word_shift_body(
-            prefix, key[0], len(members), key[2],
-            [roles[index]["d"] for index in members], key[1]))
+    for prefix, (width, count, shape, members) in sorted(across.items()):
+        proven += word_shift_body(
+            prefix, width, count, shape,
+            [roles[index]["d"] for index in members])
     for index, info in sorted(chains.items()):
         if index in seat:
             continue
@@ -2043,8 +2074,8 @@ def main(netlist, regions_path, outdir, out=None):
     if across:
         print("  %d families read across the datapath: %s"
               % (len(across), ", ".join(
-                  "%d chains %d deep" % (len(m), k[0])
-                  for k, m in sorted(across.values(), key=str))))
+                  "%d chains %d deep" % (count, width)
+                  for width, count, _, _ in sorted(across.values(), key=str))))
     regs = known_buses(netlist, regions, chains, states, banks, names)
     print("cones")
     if regs:
