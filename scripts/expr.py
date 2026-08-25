@@ -35,6 +35,13 @@ GATES = {
     "$_NMUX_": ("~(%(S)s ? %(B)s : %(A)s)", NOT, OR),
 }
 
+# What yosys leaves behind once it has found a chain of like gates and said so.
+# A chain of eleven ORs is one question asked of twelve nets, and written as
+# the reduction it is it takes one line and names the nets as the bus they are
+# rather than as eleven results nobody reads twice.
+REDUCE = {"$reduce_and": "&", "$reduce_or": "|", "$reduce_xor": "^",
+          "$reduce_xnor": "~^", "$reduce_bool": "|"}
+
 
 def binding(need, port):
     """How tightly one operand of a form has to bind"""
@@ -1082,13 +1089,22 @@ def transcribe(path, skip, alias, label=None, proven=()):
         src = driver.get(bit)
         if src is None or bit in pinned or fanout[bit] != 1:
             return None
-        if src[0] in skip or cells[src[0]]["type"] not in GATES:
+        kind = cells[src[0]]["type"]
+        if src[0] in skip or kind not in GATES:
             return None
         return src[0]
 
     def expand(name):
         """A gate as an expression, with whatever folds into it folded in"""
         cell = cells[name]
+        if cell["type"] in REDUCE:
+            # Bracketed because a reduction is the one form a line break can
+            # spoil: a not folded onto it reads `~ |{...}` once the line is
+            # wrapped, and `~ |` is two operators where `~|` is one.
+            bits = cell["connections"]["A"]
+            return ("(%s{%s})" % (REDUCE[cell["type"]],
+                                  ", ".join(build(b, ATOM)
+                                            for b in reversed(bits))), ATOM)
         form, prec, need = GATES[cell["type"]]
         args = {p: build(bits[0], binding(need, p))
                 for p, bits in cell["connections"].items()
@@ -1284,7 +1300,7 @@ def transcribe(path, skip, alias, label=None, proven=()):
     written, order = {}, []
     for name, cell in cells.items():
         if name in skip or FLOP in cell["type"] \
-                or cell["type"] not in GATES:
+                or (cell["type"] not in GATES and cell["type"] not in REDUCE):
             continue
         out = [b for p, bits in cell["connections"].items() for b in bits
                if cell["port_directions"].get(p) == "output"]

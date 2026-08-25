@@ -17,6 +17,12 @@ write_json OUT_FAITHFUL_JSON
 
 opt -full
 abc -g AND,OR,XOR,MUX
+# A chain of like gates is one question asked of a whole bus, and the
+# synthesiser leaves it as the chain it built. Naming it back as the
+# reduction it is costs a line where the chain cost one per gate, and
+# reads as the bus the design was written against. Only chains whose
+# working nets nothing else reads are taken, so nothing is lost by it.
+extract_reduce
 opt_clean
 tee -a LOG stat
 write_verilog -noattr OUT_GENERIC_V
