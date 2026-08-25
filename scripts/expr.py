@@ -1037,7 +1037,7 @@ def arrange(defs, blocks, proven=(), keep=()):
     return out
 
 
-def transcribe(path, skip, alias, label=None, proven=()):
+def transcribe(path, skip, alias, label=None, proven=(), record=None):
     """Wires, assignments and always blocks for every cell not skipped.
 
     A net that more than one gate reads becomes a wire of its own, so the
@@ -1445,12 +1445,18 @@ def transcribe(path, skip, alias, label=None, proven=()):
     # Which word each flop ended up in, written down beside the design.
     # A reader only ever sees the name in the text, but anything grading this
     # pass has to speak of a flop as the netlist names it, and once the text
-    # is written that correspondence cannot be worked out again.
+    # is written that correspondence cannot be worked out again. The caller
+    # asks for the same map when it means to read those words rather than
+    # grade them, since a datapath can only be written against a word once
+    # the word has been found and named.
+    words = {cell["connections"]["Q"][0]:
+             str(named.get(cell["connections"]["Q"][0],
+                           show(cell["connections"]["Q"][0])))
+             for cell in cells.values() if FLOP in cell["type"]}
+    if record is not None:
+        record.update(words)
     if path.endswith("_generic.json"):
-        json.dump({str(cell["connections"]["Q"][0]):
-                   str(named.get(cell["connections"]["Q"][0],
-                                 show(cell["connections"]["Q"][0])))
-                   for cell in cells.values() if FLOP in cell["type"]},
+        json.dump({str(bit): name for bit, name in words.items()},
                   open(path[:-len("_generic.json")] + "_words.json", "w"),
                   indent=1, sort_keys=True)
 

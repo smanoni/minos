@@ -266,11 +266,21 @@ def bank_attempt(netlist, region, index, workdir, inside, extra, form):
     return None
 
 
-def lift_banks(netlist, regions, workdir):
-    """Behavioural RTL for every register bank that proves equivalent"""
-    top, found = top_module(netlist), {}
+def lift_banks(netlist, regions, workdir, taken=()):
+    """Behavioural RTL for every register bank that proves equivalent.
+
+    A register that computes its own next value is offered twice, once as a
+    bank and once as the state group it also is, and where the state lift has
+    already proved it a counter the bank reading is the same registers said
+    less well. Skipping those is not only work saved: counted, they were eight
+    of the corpus's seventeen banks and every one of them a refusal.
+    """
+    top, found, skipped = top_module(netlist), {}, 0
     for index, region in enumerate(regions):
         if region["kind"] != "bank":
+            continue
+        if set(region["registers"]) <= set(taken):
+            skipped += 1
             continue
         form = flop_form(top, region["registers"])
         if form is None:
@@ -284,7 +294,9 @@ def lift_banks(netlist, regions, workdir):
                 break
         if index not in found:
             print("  region %d  not a plain bank" % index)
-    return found
+    if skipped:
+        print("  %d already lifted as a counter or a chain" % skipped)
+    return found, skipped
 
 
 def count_body(width, clear, en, updown, step, reg="q", role=None, form=RISING):
@@ -1103,13 +1115,16 @@ def datapath_line(info):
     bit, and writing the port's name there would drive the other seven from a
     proof that never mentioned them.
     """
-    lhs = info.get("target") or slice_of(info["y"])
+    return "assign %s = %s;" % (info.get("target") or slice_of(info["y"]),
+                                datapath_form(info))
+
+
+def datapath_form(info):
+    """A proven form written out against the buses it was proved against"""
     if "b" not in info:
-        return "assign %s = %s;" % (
-            lhs, re.sub(r"\ba\b", slice_of(info["a"]), info["form"]))
+        return re.sub(r"\ba\b", slice_of(info["a"]), info["form"])
     body = "%s %s %s" % (slice_of(info["a"]), info["op"], slice_of(info["b"]))
-    return "assign %s = %s;" % (lhs,
-                                "(%s)" % body if info.get("compare") else body)
+    return "(%s)" % body if info.get("compare") else body
 
 
 def shared_target(netlist, region):
@@ -1146,22 +1161,6 @@ def shared_target(netlist, region):
     return None
 
 
-def port_operands(netlist, ins):
-    """The buses a cone can be written against, which are its ports and no more.
-
-    A region carries its boundary nets out under the names the netlist gave
-    them, and an internal net's name there is not the name the recovered RTL
-    gives it: the netlist calls a net n1435, the transcription calls it after
-    the bit it is, and a form written against the first reads a wire nothing
-    drives. Ports are the one kind of name both sides agree on, so a form is
-    only written against those. The rest stay on the interface, where what is
-    proven holds for every value they take.
-    """
-    module = list(json.load(open(netlist))["modules"].values())[0]
-    ports = module.get("ports", {})
-    return {base: bits for base, bits in ins.items() if base in ports}
-
-
 SLICE = re.compile(r"^(\w+)\[(\d+):(\d+)\]$")
 
 
@@ -1186,8 +1185,123 @@ def driven_names(lines):
     return out
 
 
-def lift_datapaths(netlist, regions, workdir, done):
+SLOT = re.compile(r"^(\w+)\[(\d+)\]$")
+
+
+def known_buses(netlist, regions, chains, states, banks, names):
+    """Every word of registers the recovered RTL will have, as bits in order.
+
+    A cone reads registers, and until the registers have been put back into
+    the words they were split from there is nothing for it to read them as.
+    Two passes have already done that work between them: lifting proves a
+    chain, a counter or a bank and gives it a name, and the transcription
+    gathers whatever is left into words by what each register is loaded from.
+    Neither was reaching the cones, because both ran after them. Running the
+    transcription once first costs no proof and no synthesis, and hands the
+    cones the words they were missing.
+    """
+    module = list(json.load(open(netlist))["modules"].values())[0]
+    skip, alias, label = naming(module, regions, chains, states, banks,
+                                {}, {}, names)
+    record = {}
+    expr.transcribe(netlist, skip, alias, label, record=record)
+    slots = collections.defaultdict(dict)
+    for bit, name in record.items():
+        got = SLOT.match(name)
+        if got:
+            slots[got.group(1)][int(got.group(2))] = bit
+    out = []
+    for name in sorted(slots):
+        seats = slots[name]
+        if len(seats) > 1 and sorted(seats) == list(range(len(seats))):
+            out.append((name, [seats[i] for i in range(len(seats))]))
+    return out
+
+
+def bus_seats(module, ports, region_ports):
+    """Which of a region's ports each top module net bit arrives on"""
+    seat = {}
+    for one in region_ports:
+        bit = top_bit(module, ports, one)
+        if bit is not None:
+            seat.setdefault(bit, one)
+    return seat
+
+
+def read_buses(module, ports, ins, regs):
+    """The buses a cone can be written against, and how each one is spelt.
+
+    A region's ports carry the netlist's own names for the nets crossing its
+    boundary, and those names mean nothing in the recovered RTL: the netlist
+    calls a net n1435 where the RTL calls it after the bit it is or after the
+    register it belongs to. So a form is only offered buses whose spelling on
+    both sides is known, and every such bus is carried with the spelling to
+    write it back under.
+
+    Two kinds are known: a port of the top module, which keeps its name, and a
+    word of registers, which was given one by the pass that proved it.
+    """
+    buses, render = dict(ins), {}
+    for base, seats in ins.items():
+        if base not in ports:
+            del buses[base]
+            continue
+        for one in seats:
+            render[one] = one
+    seat = bus_seats(module, ports, [p for bits in ins.values() for p in bits])
+    for name, bits in regs:
+        got = [seat.get(b) for b in bits]
+        if any(g is None for g in got) or len(set(got)) != len(got):
+            continue
+        buses[name] = got
+        for i, one in enumerate(got):
+            render[one] = "%s[%d]" % (name, i)
+    return buses, render
+
+
+def realign(module, ports, chains, states, banks, names, paths):
+    """Renumbers a bank whose order a proved datapath disagrees with.
+
+    Which flop of a bank is bit zero is not something a netlist records, and a
+    bank is lifted in whatever order its flops came in. A datapath proved
+    against that bank therefore comes back reading a shuffle of it, and the
+    shuffle is the answer: it was proved, and it says which bit is which. So
+    the bank is renumbered to agree and the shuffle becomes the bus it always
+    was. Only banks are moved. A shift register's order is what it does, and a
+    counter's is what it counts by; a bank alone has an order to spare.
+    """
+    where = {names[index]: index for index in banks}
+    moved = {}
+    for info in paths.values():
+        for slot in ("a", "b"):
+            got = [SLOT.match(one) for one in info.get(slot, ())]
+            if not got or not all(got) or len({m.group(1) for m in got}) != 1:
+                continue
+            name = got[0].group(1)
+            order = [int(m.group(2)) for m in got]
+            if name in moved or name not in where:
+                continue
+            if sorted(order) != list(range(len(banks[where[name]]["flops"]))):
+                continue
+            moved[name] = order
+            flops = banks[where[name]]["flops"]
+            banks[where[name]]["flops"] = [flops[at] for at in order]
+    if not moved:
+        return {}
+    for info in paths.values():
+        for slot in ("a", "b"):
+            got = [SLOT.match(one) for one in info.get(slot, ())]
+            if got and all(got) and got[0].group(1) in moved:
+                info[slot] = ["%s[%d]" % (got[0].group(1), i)
+                              for i in range(len(got))]
+    for name in sorted(moved):
+        print("  bank %s renumbered to the order its datapath proved" % name)
+    return resolve(module, ports, chains, states, banks, names)
+
+
+def lift_datapaths(netlist, regions, workdir, done, regs=()):
     """An arithmetic form for every output bus that proves equivalent"""
+    top = list(json.load(open(netlist))["modules"].values())[0]
     found = {}
     for index, region in enumerate(regions):
         if region["kind"] != "cone" or region["output"] in done:
@@ -1202,10 +1316,14 @@ def lift_datapaths(netlist, regions, workdir, done):
         if y is None or not ins:
             continue
         target = shared_target(netlist, region)
-        named = port_operands(netlist, ins)
+        named, render = read_buses(top, top["ports"], ins, regs)
         hit = named and (
             lift_one_operand(path, name, named, ins, y, index, workdir) or
             lift_two_operand(path, name, named, ins, y, index, workdir))
+        if hit:
+            for slot in ("a", "b"):
+                if slot in hit:
+                    hit[slot] = [render[one] for one in hit[slot]]
         if hit and target:
             hit["target"] = target
         if hit and "b" in hit:
@@ -1334,7 +1452,32 @@ def proven_matches(netlist, outdir):
     return json.load(open(path)) if os.path.exists(path) else {}
 
 
-def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
+def register_names(module, ports, chains, states, banks):
+    """A name for every lifted register group, dropping those that cannot hold one.
+
+    Naming happens before the cones are read rather than at the end, because a
+    cone reading a register can only say so once the register has a name, and
+    a register whose roles do not resolve is going back to gates: a form
+    proved against it would name a bus that never gets written.
+    """
+    names = {}
+    for slot, index in enumerate(sorted(chains)):
+        names[index] = "r%d" % slot
+    for slot, index in enumerate(sorted(states)):
+        names[index] = "s%d" % slot
+    for slot, index in enumerate(sorted(banks)):
+        names[index] = "b%d" % slot
+    roles = resolve(module, ports, chains, states, banks, names)
+    for group in (chains, states, banks):
+        for index in [i for i in group if i not in roles]:
+            print("  region %d  cannot be named in the top module, "
+                  "left as gates" % index)
+            del group[index], names[index]
+    return names, roles
+
+
+def write_rtl(netlist, regions, chains, states, banks, cones, paths,
+              names, roles, out):
     """Assembles the proven pieces into one readable module"""
     design = json.load(open(netlist))
     top = list(design["modules"])[0]
@@ -1346,26 +1489,6 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
         spec = ports[name]
         span = "" if len(spec["bits"]) == 1 else "[%d:0] " % (len(spec["bits"]) - 1)
         head.append("  %s %s%s;" % (spec["direction"], span, name))
-    names = {}
-    for slot, index in enumerate(sorted(chains)):
-        names[index] = "r%d" % slot
-    for slot, index in enumerate(sorted(states)):
-        names[index] = "s%d" % slot
-    for slot, index in enumerate(sorted(banks)):
-        names[index] = "b%d" % slot
-    roles = resolve(module, ports, chains, states, banks, names)
-    for index in [i for i in chains if i not in roles]:
-        print("  region %d  cannot be named in the top module, left as gates"
-              % index)
-        del chains[index], names[index]
-    for index in [i for i in states if i not in roles]:
-        print("  region %d  cannot be named in the top module, left as gates"
-              % index)
-        del states[index], names[index]
-    for index in [i for i in banks if i not in roles]:
-        print("  region %d  cannot be named in the top module, left as gates"
-              % index)
-        del banks[index], names[index]
 
     matched = proven_matches(netlist, os.path.dirname(out) or ".")
     source = "%s/tmp/common_cells.v" % (os.path.dirname(out) or ".")
@@ -1633,19 +1756,18 @@ def exclusive(module, inside):
     return inside - keep
 
 
-def leftover(netlist, regions, chains, states, banks, cones, paths,
-             names, lines, proven=()):
-    """Everything no template claimed, written out as plain expressions.
+def naming(module, regions, chains, states, banks, cones, paths, names):
+    """What the transcription is told: which cells are done with, and by what
+    name to call the nets that are left.
 
-    A module is only worth proving as a whole once every output is driven, so
-    what was recognised keeps its readable form and the remainder is carried
-    over verbatim rather than dropped.
+    Split out of the writing because it is wanted twice. Once at the end, to
+    write the module; and once before the cones are read, because a datapath
+    can only be written against a word after the word has been found, and it
+    is this that finds them.
     """
-    design = json.load(open(netlist))
-    module = list(design["modules"].values())[0]
-    ports = module["ports"]
     skip, alias = set(), {}
-    for index, info in list(chains.items()) + list(states.items()) + list(banks.items()):
+    for index, info in (list(chains.items()) + list(states.items())
+                        + list(banks.items())):
         reg = names[index]
         skip |= set(regions[index]["registers"])
         skip |= exclusive(module, set(regions[index]["registers"])
@@ -1660,13 +1782,29 @@ def leftover(netlist, regions, chains, states, banks, cones, paths,
     for bit, name in port_alias(module).items():
         alias.setdefault(bit, name)
     label = {}
-    for name, spec in ports.items():
+    for name, spec in module["ports"].items():
         if spec["direction"] == "input":
             continue
         for i, bit in enumerate(spec["bits"]):
             if bit not in alias and bit not in label:
                 label[bit] = (name if len(spec["bits"]) == 1
                               else "%s_%d" % (name, i))
+    return skip, alias, label
+
+
+def leftover(netlist, regions, chains, states, banks, cones, paths,
+             names, lines, proven=()):
+    """Everything no template claimed, written out as plain expressions.
+
+    A module is only worth proving as a whole once every output is driven, so
+    what was recognised keeps its readable form and the remainder is carried
+    over verbatim rather than dropped.
+    """
+    design = json.load(open(netlist))
+    module = list(design["modules"].values())[0]
+    ports = module["ports"]
+    skip, alias, label = naming(module, regions, chains, states, banks,
+                                cones, paths, names)
     wires, body, taken, mods = expr.transcribe(netlist, skip, alias, label, proven)
     if not body:
         return [], []
@@ -1703,17 +1841,32 @@ def main(netlist, regions_path, outdir, out=None):
     print("  %d of %d state groups lifted"
           % (len(states), sum(1 for r in regions if r["kind"] == "state")))
     print("banks")
-    banks = lift_banks(netlist, regions, workdir)
+    held = taken | {f for i in states for f in states[i]["flops"]}
+    banks, skipped = lift_banks(netlist, regions, workdir, held)
     print("  %d of %d banks lifted"
-          % (len(banks), sum(1 for r in regions if r["kind"] == "bank")))
+          % (len(banks),
+             sum(1 for r in regions if r["kind"] == "bank") - skipped))
+    design = json.load(open(netlist))
+    module = list(design["modules"].values())[0]
+    names, roles = register_names(module, module["ports"], chains, states,
+                                  banks)
+    regs = known_buses(netlist, regions, chains, states, banks, names)
     print("cones")
+    if regs:
+        show = ["%s[%d:0]" % (n, len(b) - 1) for n, b in regs[:12]]
+        print("  %d words to read a cone against: %s%s"
+              % (len(regs), ", ".join(show),
+                 ", ..." if len(regs) > len(show) else ""))
     cones = lift_cones(netlist, regions, workdir)
-    paths = lift_datapaths(netlist, regions, workdir, set(cones))
+    paths = lift_datapaths(netlist, regions, workdir, set(cones), regs)
+    roles.update(realign(module, module["ports"], chains, states, banks,
+                         names, paths))
     print("  %d of %d cones lifted"
           % (len(cones) + len(paths),
              sum(1 for r in regions if r["kind"] == "cone")))
     if out:
-        write_rtl(netlist, regions, chains, states, banks, cones, paths, out)
+        write_rtl(netlist, regions, chains, states, banks, cones, paths,
+                  names, roles, out)
         verdict = prove_candidate(open(out).read().replace(
             "module %s(" % list(json.load(open(netlist))["modules"])[0],
             "module cand("), netlist_as_gold(netlist, workdir), workdir, "rtl")
