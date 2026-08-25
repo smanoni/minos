@@ -1492,13 +1492,17 @@ def bit_names(ports, direction):
     return out
 
 
-def output_wiring(ports, chains, names):
+def output_wiring(ports, chains, names, seat=()):
     """Drives each output bit from a lifted register, a constant or an input"""
     driven, lines = {}, []
     for slot, (index, info) in enumerate(sorted(chains.items())):
         for role, port in info["roles"].items():
-            if numbered(role, "q"):
-                driven[port] = "%s[%s]" % (names[index], role[1:])
+            if not numbered(role, "q"):
+                continue
+            driven[port] = ("%s%s[%d]" % (seat[index][0], role[1:],
+                                          seat[index][1])
+                            if index in seat
+                            else "%s[%s]" % (names[index], role[1:]))
     inputs = {bit: name for name, bit in bit_names(ports, "input").items()}
     for name, bit in sorted(bit_names(ports, "output").items()):
         if name in driven:
@@ -1564,6 +1568,53 @@ def proven_matches(netlist, outdir):
     return json.load(open(path)) if os.path.exists(path) else {}
 
 
+def chain_words(chains, roles, names):
+    """Chains alike enough to be read across the datapath instead of along it.
+
+    A pipeline is one register per stage, as wide as the data. Synthesis
+    leaves it as one chain per bit, and reading those along the datapath gives
+    a register apiece: des comes back as 512 two deep shift registers where
+    the design has two registers 512 bits wide. Where a family of chains
+    shares its clock and its depth and has neither enable nor reset, the stage
+    is the word and the chain is one bit of it, which is the same registers
+    said the way they were written.
+
+    Only where a family has more chains than it has stages. Read across, a
+    family costs a declaration and a line per stage where along it costs one
+    per chain, so eight chains fifteen deep are better left as they are.
+    """
+    family = collections.defaultdict(list)
+    for index, info in sorted(chains.items()):
+        if info.get("form") not in (None, "shift") or info["enable"] \
+                or info["clear"]:
+            continue
+        role = roles.get(index)
+        if role is None or info["width"] < 2:
+            continue
+        family[(info["width"], info["edges"], role["clk"])].append(index)
+    out, seat = {}, {}
+    for at, key in enumerate(sorted(family, key=str)):
+        members = family[key]
+        if len(members) <= key[0]:
+            continue
+        for slot, index in enumerate(members):
+            seat[index] = ("pipe%d_" % at, slot)
+        out["pipe%d_" % at] = (key, members)
+    return out, seat
+
+
+def word_shift_body(prefix, width, count, clock, feeds, form):
+    """A family of chains as one register per stage, widest end first"""
+    lines = ["  reg [%d:0] %s%d;" % (count - 1, prefix, at)
+             for at in range(width)]
+    lines.append("  always @(%s %s) begin" % (form[0], clock))
+    lines += expr.packed("    %s0 <= {" % prefix, "        ",
+                         list(reversed(feeds)), "};")
+    lines += ["    %s%d <= %s%d;" % (prefix, at, prefix, at - 1)
+              for at in range(1, width)]
+    return lines + ["  end"]
+
+
 def register_names(module, ports, chains, states, banks):
     """A name for every lifted register group, dropping those that cannot hold one.
 
@@ -1589,7 +1640,7 @@ def register_names(module, ports, chains, states, banks):
 
 
 def write_rtl(netlist, regions, chains, states, banks, cones, paths,
-              names, roles, out):
+              names, roles, across, seat, out):
     """Assembles the proven pieces into one readable module"""
     design = json.load(open(netlist))
     top = list(design["modules"])[0]
@@ -1612,7 +1663,13 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths,
     # the arranger weighs putting them first against putting them among the
     # logic they read.
     proven = []
+    for prefix, (key, members) in sorted(across.items()):
+        proven.append(word_shift_body(
+            prefix, key[0], len(members), key[2],
+            [roles[index]["d"] for index in members], key[1]))
     for index, info in sorted(chains.items()):
+        if index in seat:
+            continue
         reg = names[index]
         piece = ["  reg [%d:0] %s;" % (info["width"] - 1, reg)]
         if info.get("form") == "load":
@@ -1655,10 +1712,10 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths,
         proven.append(["  " + expr])
     for output, info in sorted(paths.items()):
         proven.append(["  " + datapath_line(info)])
-    proven += [[one] for one in output_wiring(ports, chains, names)]
+    proven += [[one] for one in output_wiring(ports, chains, names, seat)]
     lines = [one for piece in proven for one in piece]
     rest, mods = leftover(netlist, regions, chains, states, banks, cones,
-                          paths, names, lines, proven)
+                          paths, names, lines, proven, seat)
     lines = head + declare(lines, ports, rest) + rest
     tail = ["endmodule", ""]
     if mods:
@@ -1883,7 +1940,8 @@ def exclusive(module, inside):
         drop -= keep
 
 
-def naming(module, regions, chains, states, banks, cones, paths, names):
+def naming(module, regions, chains, states, banks, cones, paths, names,
+           seat=()):
     """What the transcription is told: which cells are done with, and by what
     name to call the nets that are left.
 
@@ -1901,8 +1959,12 @@ def naming(module, regions, chains, states, banks, cones, paths, names):
                           | set(info.get("muxes", ()))
                           | set(info.get("inside", ())))
         for bit, flop in enumerate(info["flops"]):
-            alias[module["cells"][flop]["connections"]["Q"][0]] = \
-                "%s[%d]" % (reg, bit)
+            # A chain read across the datapath is named for the stage it is in
+            # and the bit of that stage it carries, which is the other way
+            # round from a chain that stands on its own.
+            alias[module["cells"][flop]["connections"]["Q"][0]] = (
+                "%s%d[%d]" % (seat[index][0], bit, seat[index][1])
+                if index in seat else "%s[%d]" % (reg, bit))
     for region in regions:
         if region["kind"] == "cone" and region["output"] in set(cones) | set(paths):
             skip |= exclusive(module, set(region["cells"]))
@@ -1920,7 +1982,7 @@ def naming(module, regions, chains, states, banks, cones, paths, names):
 
 
 def leftover(netlist, regions, chains, states, banks, cones, paths,
-             names, lines, proven=()):
+             names, lines, proven=(), seat=()):
     """Everything no template claimed, written out as plain expressions.
 
     A module is only worth proving as a whole once every output is driven, so
@@ -1931,7 +1993,7 @@ def leftover(netlist, regions, chains, states, banks, cones, paths,
     module = list(design["modules"].values())[0]
     ports = module["ports"]
     skip, alias, label = naming(module, regions, chains, states, banks,
-                                cones, paths, names)
+                                cones, paths, names, seat)
     wires, body, taken, mods = expr.transcribe(netlist, skip, alias, label, proven)
     if not body:
         return [], []
@@ -1977,6 +2039,12 @@ def main(netlist, regions_path, outdir, out=None):
     module = list(design["modules"].values())[0]
     names, roles = register_names(module, module["ports"], chains, states,
                                   banks)
+    across, seat = chain_words(chains, roles, names)
+    if across:
+        print("  %d families read across the datapath: %s"
+              % (len(across), ", ".join(
+                  "%d chains %d deep" % (len(m), k[0])
+                  for k, m in sorted(across.values(), key=str))))
     regs = known_buses(netlist, regions, chains, states, banks, names)
     print("cones")
     if regs:
@@ -1993,7 +2061,7 @@ def main(netlist, regions_path, outdir, out=None):
              sum(1 for r in regions if r["kind"] == "cone")))
     if out:
         write_rtl(netlist, regions, chains, states, banks, cones, paths,
-                  names, roles, out)
+                  names, roles, across, seat, out)
         verdict = prove_candidate(open(out).read().replace(
             "module %s(" % list(json.load(open(netlist))["modules"])[0],
             "module cand("), netlist_as_gold(netlist, workdir), workdir, "rtl")
