@@ -783,7 +783,33 @@ def lift_cones(netlist, regions, workdir):
 # it reads as rather than the product it is also equal to.
 DATAPATH_OPS = [("bitwise and", "&"), ("bitwise or", "|"),
                 ("bitwise xor", "^"), ("sum", "+"), ("difference", "-"),
-                ("product", "*")]
+                ("product", "*"),
+                ("shift left", "<<"), ("shift right", ">>")]
+
+# Forms whose result is one bit however wide the operands are. Kept apart from
+# the rest because a comparison proved against a wide result would be proved
+# against its bottom bit alone, which is a different claim.
+COMPARE_OPS = [("equal", "=="), ("not equal", "!="),
+               ("less than", "<"), ("less or equal", "<="),
+               ("greater than", ">"), ("greater or equal", ">=")]
+
+# A word carrying a sign is a word like any other in a netlist, since two's
+# complement makes the adder that builds it the same adder. The sign only
+# shows in what is asked of the word afterwards, so these are the forms that
+# tell a signed bus from an unsigned one, and the only place it can be told.
+SIGN_TESTS = [("positive", "$signed(a) > 0"),
+              ("negative", "$signed(a) < 0"),
+              ("not negative", "$signed(a) >= 0"),
+              ("not positive", "$signed(a) <= 0")]
+
+# What one operand alone can be. A cone the width of its input is a bitwise
+# form of it; a cone one bit wide is a question asked of all of it.
+UNARY_OPS = [("bitwise not", "~a"), ("negation", "-a"),
+             ("increment", "a + 1"), ("decrement", "a - 1")]
+
+REDUCE_OPS = [("or of every bit", "|a"), ("and of every bit", "&a"),
+              ("xor of every bit", "^a"), ("nor of every bit", "~|a"),
+              ("nand of every bit", "~&a")]
 
 
 def port_buses(path, module_name, direction):
@@ -868,6 +894,298 @@ def datapath_candidate(op, awidth, bwidth, cwidth, ywidth):
         "endmodule", ""])
 
 
+def output_bus(region, outs):
+    """The bus a cone was drawn around, told apart from what extraction exposed.
+
+    Cutting a region out of a netlist makes a port of every net crossing its
+    boundary, so a cone whose result is one bus comes back carrying dozens of
+    them: present's ciphertext arrives with thirty-seven, open8's address with
+    ninety-eight. Counting them therefore says nothing, and the cone would be
+    passed over for having too many results. The region records the net it was
+    drawn around, and that one is the result; the rest are working nets that a
+    reader of the recovered RTL never sees.
+    """
+    if region.get("output") in outs:
+        return outs[region["output"]]
+    return list(outs.values())[0] if len(outs) == 1 else None
+
+
+def plausible(a, b, y):
+    """Whether two operands could be what a result of this width was made from.
+
+    The same exposed ports that hide the result also offer hundreds of things
+    to read as an operand, and trying every pair against every form would cost
+    more than the rest of the flow. Width rules most of them out for nothing:
+    a bitwise form, a sum and a difference are as wide as their result, a
+    product is made of its halves, and a shift takes an amount that need not
+    be wide at all. What survives is small enough to prove one at a time.
+    """
+    n = len(y)
+    return (len(a) == len(b) == n
+            or len(a) == len(b) == (n + 1) // 2
+            or (len(a) == n and len(b) <= n))
+
+
+def one_operand_wrapper(name, inner, a, rest, y):
+    """Names the region's ports as a single operand, a result and what is left"""
+    conn = {}
+    for i, port in enumerate(a):
+        conn[port] = "a[%d]" % i
+    for i, port in enumerate(rest):
+        conn[port] = "c[%d]" % i
+    for i, port in enumerate(y):
+        conn[port] = "y[%d]" % i
+    body = ["module %s(a, c, y);" % name,
+            "  input [%d:0] a;" % (len(a) - 1),
+            "  input [%d:0] c;" % (max(len(rest), 1) - 1),
+            "  output [%d:0] y;" % (len(y) - 1),
+            "  %s i_dut (%s);" % (inner, ", ".join(
+                ".%s(%s)" % (match.escape(p), e)
+                for p, e in sorted(conn.items()))),
+            "endmodule", ""]
+    return "\n".join(body)
+
+
+def one_operand_candidate(form, awidth, cwidth, ywidth):
+    return "\n".join([
+        "module cand(a, c, y);",
+        "  input [%d:0] a;" % (awidth - 1),
+        "  input [%d:0] c;" % (max(cwidth, 1) - 1),
+        "  output [%d:0] y;" % (ywidth - 1),
+        "  assign y = %s;" % form,
+        "endmodule", ""])
+
+
+def compare_candidate(op, awidth, bwidth, cwidth):
+    return "\n".join([
+        "module cand(a, b, c, y);",
+        "  input [%d:0] a;" % (awidth - 1),
+        "  input [%d:0] b;" % (bwidth - 1),
+        "  input [%d:0] c;" % (max(cwidth, 1) - 1),
+        "  output y;",
+        "  assign y = (a %s b);" % op,
+        "endmodule", ""])
+
+
+def constant_at_zero(gold, workdir, tag):
+    """What a cone puts out when its operand is nothing.
+
+    A form written against a constant cannot be guessed at and cannot be swept
+    for, since the constant is as wide as the bus. Held at zero the cone
+    reports it directly: an exclusive or gives back the constant itself and a
+    sum gives back the amount added, so one call replaces the sweep.
+    """
+    code, out = match.yosys(
+        ["read_json %s" % gold, "hierarchy -top gold", "sat -set a 0 -show y"],
+        "%s/%s_zero.ys" % (workdir, tag))
+    if code:
+        return None
+    for line in out.split("\n"):
+        got = re.match(r"\s*\\?y\s+(\d+)\s", line)
+        if got:
+            return int(got.group(1))
+    return None
+
+
+# How many operand pairs one cone is worth. A cone whose ports are all one bit
+# wide offers hundreds of pairs and none of them is a datapath, so the search
+# is stopped rather than allowed to cost more than every other region together.
+PAIR_CEILING = 32
+
+# A form of one operand reads a whole word, so the buses worth offering it are
+# the widest few. A cone left holding a hundred single nets has no word among
+# them and would otherwise pay a proof for each.
+OPERAND_CEILING = 8
+
+
+def operand_when_true(gold, workdir, tag):
+    """The operand a one bit cone answers yes to, which is what it tests for"""
+    code, out = match.yosys(
+        ["read_json %s" % gold, "hierarchy -top gold", "sat -set y 1 -show a"],
+        "%s/%s_true.ys" % (workdir, tag))
+    if code:
+        return None
+    for line in out.split("\n"):
+        got = re.match(r"\s*\\?a\s+(\d+)\s", line)
+        if got:
+            return int(got.group(1))
+    return None
+
+
+def one_operand_forms(gold, awidth, ywidth, workdir, tag):
+    """Every form of one operand worth trying against a cone of this shape"""
+    forms = []
+    if awidth == ywidth:
+        forms += UNARY_OPS
+    if ywidth == 1:
+        forms += REDUCE_OPS
+        forms += SIGN_TESTS
+        seen = operand_when_true(gold, workdir, tag)
+        if seen is not None:
+            forms.append(("equals %d" % seen, "a == %d'd%d" % (awidth, seen)))
+    if awidth == ywidth:
+        held = constant_at_zero(gold, workdir, tag)
+        if held:
+            forms.append(("exclusive or with %d" % held,
+                          "a ^ %d'd%d" % (ywidth, held)))
+            forms.append(("sum with %d" % held, "a + %d'd%d" % (ywidth, held)))
+    return forms
+
+
+def lift_one_operand(path, name, named, ins, y, index, workdir):
+    """A form written against a single operand, where the cone reads as one"""
+    for a in sorted(named.values(), key=len, reverse=True)[:OPERAND_CEILING]:
+        if len(a) != len(y) and len(y) != 1:
+            continue
+        rest = sorted(p for bits in ins.values() for p in bits
+                      if p not in set(a))
+        wrap = "%s/up_%d_wrap.v" % (workdir, index)
+        open(wrap, "w").write(one_operand_wrapper("gold", name, a, rest, y))
+        code, log = match.yosys(
+            ["read_json %s" % path, "read_verilog %s" % wrap,
+             "hierarchy -top gold", "flatten", "opt_clean",
+             "write_json %s/gold.json" % workdir],
+            "%s/up_%d_wrap.ys" % (workdir, index))
+        if code:
+            continue
+        gold = "%s/gold.json" % workdir
+        for label, form in one_operand_forms(gold, len(a), len(y),
+                                             workdir, "up_%d" % index):
+            verdict = prove_candidate(
+                one_operand_candidate(form, len(a), len(rest), len(y)),
+                gold, workdir, "up_%d" % index)
+            if verdict == "PROVEN EQUIVALENT":
+                return {"label": label, "form": form, "a": a, "y": y}
+    return None
+
+
+def lift_two_operand(path, name, named, ins, y, index, workdir):
+    """An arithmetic or comparing form written against two of a cone's buses"""
+    pairs = [(a, b) for a, b in operand_pairs(named) if plausible(a, b, y)]
+    pairs.sort(key=lambda ab: len(ab[0]) + len(ab[1]), reverse=True)
+    for a, b in pairs[:PAIR_CEILING]:
+        used = set(a) | set(b)
+        rest = sorted(p for bits in ins.values() for p in bits
+                      if p not in used)
+        wrap = "%s/dp_%d_wrap.v" % (workdir, index)
+        open(wrap, "w").write(datapath_wrapper("gold", name, a, b, rest, y))
+        code, log = match.yosys(
+            ["read_json %s" % path, "read_verilog %s" % wrap,
+             "hierarchy -top gold", "flatten", "opt_clean",
+             "write_json %s/gold.json" % workdir],
+            "%s/dp_%d_wrap.ys" % (workdir, index))
+        if code:
+            continue
+        gold = "%s/gold.json" % workdir
+        for label, op in DATAPATH_OPS:
+            verdict = prove_candidate(
+                datapath_candidate(op, len(a), len(b), len(rest), len(y)),
+                gold, workdir, "dp_%d" % index)
+            if verdict == "PROVEN EQUIVALENT":
+                return {"label": label, "op": op, "a": a, "b": b, "y": y}
+        if len(y) != 1:
+            continue
+        for label, op in COMPARE_OPS:
+            verdict = prove_candidate(
+                compare_candidate(op, len(a), len(b), len(rest)),
+                gold, workdir, "cmp_%d" % index)
+            if verdict == "PROVEN EQUIVALENT":
+                return {"label": label, "op": op, "a": a, "b": b, "y": y,
+                        "compare": True}
+    return None
+
+
+def datapath_line(info):
+    """A proven cone written back as the assignment it was proved to be.
+
+    The left side is the cone's own bits and not the port they belong to: a
+    region drawn round one bit of an eight bit output is a claim about that
+    bit, and writing the port's name there would drive the other seven from a
+    proof that never mentioned them.
+    """
+    lhs = info.get("target") or slice_of(info["y"])
+    if "b" not in info:
+        return "assign %s = %s;" % (
+            lhs, re.sub(r"\ba\b", slice_of(info["a"]), info["form"]))
+    body = "%s %s %s" % (slice_of(info["a"]), info["op"], slice_of(info["b"]))
+    return "assign %s = %s;" % (lhs,
+                                "(%s)" % body if info.get("compare") else body)
+
+
+def shared_target(netlist, region):
+    """The name a cone's result carries when more than one port bit reads it.
+
+    Synthesis drives seven bits of an output from one net where the design
+    said so, and the region is then drawn round that net but recorded under
+    only one of those bits. Writing the form back to that one bit would be a
+    claim about all seven, and the six left over would lose the logic that
+    drove them. The net has a name of its own in the recovered RTL, the one
+    the output wiring already reads, and that is what the assignment takes.
+
+    None when the result is not shared, where a slice of the port says it.
+    """
+    module = list(json.load(open(netlist))["modules"].values())[0]
+    ports = module.get("ports", {})
+    where = collections.defaultdict(list)
+    for name, spec in ports.items():
+        if spec["direction"] == "input":
+            continue
+        for i, bit in enumerate(spec["bits"]):
+            if not isinstance(bit, str):
+                where[bit].append((name, i))
+    for name in region.get("bits", []):
+        base, index = match.bit_order(name)
+        spec = ports.get(base)
+        if spec is None or index < 0 or index >= len(spec["bits"]):
+            continue
+        seats = where[spec["bits"][index]]
+        if len(seats) > 1:
+            port, first = seats[0]
+            return port if len(ports[port]["bits"]) == 1 else \
+                "%s_%d" % (port, first)
+    return None
+
+
+def port_operands(netlist, ins):
+    """The buses a cone can be written against, which are its ports and no more.
+
+    A region carries its boundary nets out under the names the netlist gave
+    them, and an internal net's name there is not the name the recovered RTL
+    gives it: the netlist calls a net n1435, the transcription calls it after
+    the bit it is, and a form written against the first reads a wire nothing
+    drives. Ports are the one kind of name both sides agree on, so a form is
+    only written against those. The rest stay on the interface, where what is
+    proven holds for every value they take.
+    """
+    module = list(json.load(open(netlist))["modules"].values())[0]
+    ports = module.get("ports", {})
+    return {base: bits for base, bits in ins.items() if base in ports}
+
+
+SLICE = re.compile(r"^(\w+)\[(\d+):(\d+)\]$")
+
+
+def driven_names(lines):
+    """Every name an assignment drives, a slice counted as the bits it covers.
+
+    Wiring an output port up asks, bit by bit, whether that bit already has a
+    driver. A form proved for a whole word is written as the slice it is, and
+    a slice left as the text it was written in answers for no single bit: the
+    port is then wired again, bit by bit, to names that the proof replaced and
+    nothing drives any more. Yosys reads those as constants and still proves
+    the module; a simulator refuses to bind them, which is how this was found.
+    """
+    out = set()
+    for one in re.findall(r"assign (\S+?) =", "\n".join(lines)):
+        out.add(one)
+        got = SLICE.match(one)
+        if got:
+            base, first, last = got.group(1), int(got.group(2)), int(got.group(3))
+            out.update("%s[%d]" % (base, i)
+                       for i in range(min(first, last), max(first, last) + 1))
+    return out
+
+
 def lift_datapaths(netlist, regions, workdir, done):
     """An arithmetic form for every output bus that proves equivalent"""
     found = {}
@@ -880,39 +1198,28 @@ def lift_datapaths(netlist, regions, workdir, done):
         path, name = got
         outs = port_buses(path, name, "output")
         ins = port_buses(path, name, "input")
-        if len(outs) != 1 or not ins:
+        y = output_bus(region, outs)
+        if y is None or not ins:
             continue
-        y = list(outs.values())[0]
-        hit = None
-        for a, b in operand_pairs(ins):
-            used = set(a) | set(b)
-            rest = sorted(p for bits in ins.values() for p in bits
-                          if p not in used)
-            wrap = "%s/dp_%d_wrap.v" % (workdir, index)
-            open(wrap, "w").write(datapath_wrapper("gold", name, a, b, rest, y))
-            code, log = match.yosys(
-                ["read_json %s" % path, "read_verilog %s" % wrap,
-                 "hierarchy -top gold", "flatten", "opt_clean",
-                 "write_json %s/gold.json" % workdir],
-                "%s/dp_%d_wrap.ys" % (workdir, index))
-            if code:
-                continue
-            for label, op in DATAPATH_OPS:
-                verdict = prove_candidate(
-                    datapath_candidate(op, len(a), len(b), len(rest), len(y)),
-                    "%s/gold.json" % workdir, workdir, "dp_%d" % index)
-                if verdict == "PROVEN EQUIVALENT":
-                    hit = {"label": label, "op": op, "a": a, "b": b, "y": y}
-                    break
-            if hit:
-                break
-        if hit:
+        target = shared_target(netlist, region)
+        named = port_operands(netlist, ins)
+        hit = named and (
+            lift_one_operand(path, name, named, ins, y, index, workdir) or
+            lift_two_operand(path, name, named, ins, y, index, workdir))
+        if hit and target:
+            hit["target"] = target
+        if hit and "b" in hit:
             print("  cone %-12s %s of %s and %s"
                   % (region["output"], hit["label"],
                      slice_of(hit["a"]), slice_of(hit["b"])))
-            found[region["output"]] = hit
+        elif hit:
+            print("  cone %-12s %-14s %s"
+                  % (region["output"], hit["label"],
+                     re.sub(r"\ba\b", slice_of(hit["a"]), hit["form"])))
         else:
             print("  cone %-12s no arithmetic form" % region["output"])
+        if hit:
+            found[region["output"]] = hit
     return found
 
 
@@ -920,6 +1227,10 @@ def slice_of(bits):
     """Writes a list of port bits back as a slice where they form one"""
     parts = [match.bit_order(b) for b in bits]
     base = parts[0][0]
+    # A port that never carried a bracket carries no position either, so it is
+    # written as it stands rather than as bit minus one of itself.
+    if len(parts) == 1 and parts[0][1] < 0:
+        return base
     if all(p[0] == base for p in parts) and \
             [p[1] for p in parts] == list(range(parts[0][1], parts[-1][1] + 1)):
         if parts[0][1] == parts[-1][1]:
@@ -1108,9 +1419,7 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, out):
             expr = re.sub(r"\b%s\b" % letter, names.get(slot, letter), expr)
         proven.append(["  " + expr])
     for output, info in sorted(paths.items()):
-        proven.append(["  assign %s = %s %s %s;"
-                       % (output, slice_of(info["a"]), info["op"],
-                          slice_of(info["b"]))])
+        proven.append(["  " + datapath_line(info)])
     proven += [[one] for one in output_wiring(ports, chains, names)]
     lines = [one for piece in proven for one in piece]
     rest, mods = leftover(netlist, regions, chains, states, banks, cones,
@@ -1361,7 +1670,7 @@ def leftover(netlist, regions, chains, states, banks, cones, paths,
     wires, body, taken, mods = expr.transcribe(netlist, skip, alias, label, proven)
     if not body:
         return [], []
-    driven = set(re.findall(r"assign (\S+?) =", "\n".join(lines)))
+    driven = driven_names(lines)
     tail = []
     for name, spec in ports.items():
         if spec["direction"] == "input" or name in driven:
