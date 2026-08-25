@@ -1071,11 +1071,93 @@ def lift_one_operand(path, name, named, ins, y, index, workdir):
     return None
 
 
-def lift_two_operand(path, name, named, ins, y, index, workdir):
+def leaves(module, drive, bit, cap=4):
+    """The nets a bit's logic bottoms out on, where there are few enough.
+
+    Stops where the cone does: at a register, at a port, at anything no gate
+    in the design drives. More than a handful means the bit is not a bitwise
+    function of anything and there is nothing here to say about it.
+    """
+    cells, seen, out, queue = module["cells"], set(), set(), [bit]
+    while queue:
+        one = queue.pop()
+        if one in seen:
+            continue
+        seen.add(one)
+        src = drive.get(one)
+        if src is None or match.FLOP in cells[src]["type"]:
+            out.add(one)
+            if len(out) > cap:
+                return None
+            continue
+        queue += [b for port, conn in cells[src]["connections"].items()
+                  for b in conn
+                  if cells[src]["port_directions"].get(port) == "input"]
+    return sorted(out)
+
+
+def bit_naming(module, regs, render, seat):
+    """Every net the recovered RTL can name, as the name it will carry there"""
+    out = {}
+    for name, bits in regs:
+        for i, bit in enumerate(bits):
+            out[bit] = "%s[%d]" % (name, i)
+    for one, name in render.items():
+        for bit, at in seat.items():
+            if at == one:
+                out[bit] = name
+    return out
+
+
+def paired(module, y, seat, spelling):
+    """The two operands a bitwise cone is written against, read off the cone.
+
+    A bitwise form is the one shape whose operands need no searching. Each
+    output bit is a function of one bit of each operand, so walking back from
+    that bit says which two nets they are, and the word each net belongs to
+    says which operand is which. Searching instead asks the pairing to be
+    guessed, and two words whose bit order was settled by different passes do
+    not line up by luck. present's ciphertext is one 64 bit exclusive or of
+    two recovered words and every bit of it takes a different position in
+    each: `word0[64] ^ word1[12]`, then `word0[79] ^ word1[60]`. No whole bus
+    offered either way round can be that, which is why the search refused a
+    form the design plainly writes down.
+
+    Membership is asked of the naming and not of the buses on offer, because a
+    cone that reads two thirds of a word is reading that word: present's takes
+    64 bits of an 80 bit key, and demanding the whole of it loses the operand
+    altogether.
+    """
+    drive = driver_map(module)
+    first, second, heads = [], [], None
+    for bit in y:
+        top = top_bit(module, module["ports"], bit)
+        got = None if top is None else leaves(module, drive, top, 2)
+        if not got or len(got) != 2:
+            return None
+        if any(one not in spelling or one not in seat for one in got):
+            return None
+        bases = [match.bit_order(spelling[one])[0] for one in got]
+        if bases[0] == bases[1]:
+            return None
+        if heads is None:
+            heads = tuple(sorted(bases))
+        pick = dict(zip(bases, got))
+        if set(pick) != set(heads):
+            return None
+        first.append(seat[pick[heads[0]]])
+        second.append(seat[pick[heads[1]]])
+    if len(set(first)) != len(first) or len(set(second)) != len(second):
+        return None
+    return (first, second) if first else None
+
+
+def lift_two_operand(path, name, named, ins, y, index, workdir, read=None):
     """An arithmetic or comparing form written against two of a cone's buses"""
     pairs = [(a, b) for a, b in operand_pairs(named) if plausible(a, b, y)]
     pairs.sort(key=lambda ab: len(ab[0]) + len(ab[1]), reverse=True)
-    for a, b in pairs[:PAIR_CEILING]:
+    pairs = ([read] if read else []) + pairs[:PAIR_CEILING]
+    for a, b in pairs:
         used = set(a) | set(b)
         rest = sorted(p for bits in ins.values() for p in bits
                       if p not in used)
@@ -1317,13 +1399,20 @@ def lift_datapaths(netlist, regions, workdir, done, regs=()):
             continue
         target = shared_target(netlist, region)
         named, render = read_buses(top, top["ports"], ins, regs)
-        hit = named and (
+        seat = bus_seats(top, top["ports"],
+                         [p for bits in ins.values() for p in bits])
+        spelling = bit_naming(top, regs, render, seat)
+        read = paired(top, y, seat, spelling)
+        speak = dict(render)
+        for bit, one in seat.items():
+            speak.setdefault(one, spelling.get(bit, one))
+        hit = (named or read) and (
             lift_one_operand(path, name, named, ins, y, index, workdir) or
-            lift_two_operand(path, name, named, ins, y, index, workdir))
+            lift_two_operand(path, name, named, ins, y, index, workdir, read))
         if hit:
             for slot in ("a", "b"):
                 if slot in hit:
-                    hit[slot] = [render[one] for one in hit[slot]]
+                    hit[slot] = [speak[one] for one in hit[slot]]
         if hit and target:
             hit["target"] = target
         if hit and "b" in hit:
