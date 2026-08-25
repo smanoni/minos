@@ -796,7 +796,15 @@ def lift_cones(netlist, regions, workdir):
 DATAPATH_OPS = [("bitwise and", "&"), ("bitwise or", "|"),
                 ("bitwise xor", "^"), ("sum", "+"), ("difference", "-"),
                 ("product", "*"),
-                ("shift left", "<<"), ("shift right", ">>")]
+                ("shift left", "<<"), ("shift right", ">>"),
+                # One operand inverted, which is a form in its own right and
+                # not a spelling of the three above. It is what the gate basis
+                # itself offers, and a design that writes `a & ~b` comes back
+                # as exactly that pair of cells: present's ready is a not and
+                # an and, and hd_8b10b's output enable only ever lifted by
+                # being called a comparison, which `~a | b` is not.
+                ("bitwise and not", "& ~"), ("bitwise or not", "| ~"),
+                ("bitwise xnor", "^ ~")]
 
 # Forms whose result is one bit however wide the operands are. Kept apart from
 # the rest because a comparison proved against a wide result would be proved
@@ -1157,27 +1165,41 @@ def lift_two_operand(path, name, named, ins, y, index, workdir, read=None):
     pairs = [(a, b) for a, b in operand_pairs(named) if plausible(a, b, y)]
     pairs.sort(key=lambda ab: len(ab[0]) + len(ab[1]), reverse=True)
     pairs = ([read] if read else []) + pairs[:PAIR_CEILING]
-    for a, b in pairs:
+    ready = []
+    for at, (a, b) in enumerate(pairs):
         used = set(a) | set(b)
         rest = sorted(p for bits in ins.values() for p in bits
                       if p not in used)
         wrap = "%s/dp_%d_wrap.v" % (workdir, index)
         open(wrap, "w").write(datapath_wrapper("gold", name, a, b, rest, y))
+        # Each pair keeps its own reference, since the comparisons are only
+        # reached once every pair has been through the bitwise forms and a
+        # shared file would by then hold the last pair's wrapper.
+        gold = "%s/dp_%d_%d_gold.json" % (workdir, index, at)
         code, log = match.yosys(
             ["read_json %s" % path, "read_verilog %s" % wrap,
              "hierarchy -top gold", "flatten", "opt_clean",
-             "write_json %s/gold.json" % workdir],
+             "write_json %s" % gold],
             "%s/dp_%d_wrap.ys" % (workdir, index))
         if code:
             continue
-        gold = "%s/gold.json" % workdir
         for label, op in DATAPATH_OPS:
             verdict = prove_candidate(
                 datapath_candidate(op, len(a), len(b), len(rest), len(y)),
                 gold, workdir, "dp_%d" % index)
             if verdict == "PROVEN EQUIVALENT":
                 return {"label": label, "op": op, "a": a, "b": b, "y": y}
-        if len(y) != 1:
+        ready.append((a, b, rest, gold))
+
+    # Comparisons last, and never between single bits. Every one of them is a
+    # boolean form of one bit written as arithmetic: `a <= b` on one bit is
+    # `~a | b`, and hd_8b10b's output enable was coming back as a comparison
+    # of a reset against an input, which is not what the design says and not
+    # what a reader would write. Tried after every pair has been offered the
+    # bitwise forms, so a comparison is only reached where nothing plainer
+    # holds.
+    for a, b, rest, gold in ready:
+        if len(y) != 1 or len(a) == 1:
             continue
         for label, op in COMPARE_OPS:
             verdict = prove_candidate(
@@ -1206,6 +1228,7 @@ def datapath_form(info):
     if "b" not in info:
         return re.sub(r"\ba\b", slice_of(info["a"]), info["form"])
     body = "%s %s %s" % (slice_of(info["a"]), info["op"], slice_of(info["b"]))
+    body = body.replace("~ ", "~")
     return "(%s)" % body if info.get("compare") else body
 
 
