@@ -81,21 +81,45 @@ def held(role, clear, form, reg, width):
                                         role[clear[0]], reg, word)
 
 
-def guarded(width, clear, reg, role, form, guard, move):
-    """A template's always block, with the reset arm only where there is one"""
+def guarded(width, clear, reg, role, form, guard, move, split=False):
+    """A template's always block, with the reset arm only where there is one.
+
+    Split, the value the register takes is given a name of its own and the
+    block does nothing but take it, which is how the sources this corpus came
+    from write a register. It is not only a convention: a next value with no
+    name is a next value nothing can be proved about, and every attempt to say
+    what a register takes has had to write the expression back inside the
+    block that consumes it.
+
+    A reset is not split out. It is not the register's next value, it is what
+    happens instead of taking one.
+    """
     lines = ["  always @(%s)" % sensitivity(role, clear, form)]
+    if split:
+        held_reg, want = "%s_q" % reg, move.split("<=", 1)[1].strip()
+        lines = ["  assign %s_d = %s" % (reg, re.sub(
+            r"\b%s\b" % re.escape(reg), held_reg, want))] + lines
+        move = "%s <= %s_d;" % (held_reg, reg)
+    else:
+        held_reg = reg
     if clear:
-        return lines + [held(role, clear, form, reg, width),
+        return lines + [held(role, clear, form, held_reg, width),
                         "    else %s%s" % (guard, move)]
     return lines + ["    %s%s" % (guard, move)]
 
 
-def shift_body(width, enable, clear, reg="q", role=None, form=RISING):
+def state_decl(width, reg):
+    """A register declared the way the sources this corpus came from write one"""
+    span = "[%d:0] " % (width - 1)
+    return ["  wire %s%s_d;" % (span, reg), "  reg %s%s_q;" % (span, reg)]
+
+
+def shift_body(width, enable, clear, reg="q", role=None, form=RISING, split=False):
     """A register whose data comes from the stage before it, in given names"""
     role = role or CANONICAL
     return guarded(width, clear, reg, role, form,
                    "if (%s) " % role["en"] if enable else "",
-                   "%s <= {%s[%d:0], %s};" % (reg, reg, width - 2, role["d"]))
+                   "%s <= {%s[%d:0], %s};" % (reg, reg, width - 2, role["d"]), split)
 
 
 def shift_register(width, enable, clear, form=RISING):
@@ -131,10 +155,17 @@ def value_of(width, role):
     return "{%s}" % ", ".join(bits)
 
 
-def load_shift_body(width, shift_on, reg="q", role=None, form=RISING):
+def load_shift_body(width, shift_on, reg="q", role=None, form=RISING,
+                    split=False):
     """A shift register that takes a whole word when its select says so"""
     role = role or dict(CANONICAL, ld="ld",
                         **{"v%d" % i: "v[%d]" % i for i in range(1, width)})
+    if split:
+        return ["  assign %s_d = %s%s ? %s : {%s_q[%d:0], %s};"
+                % (reg, "!" if shift_on else "", role["ld"],
+                   value_of(width, role), reg, width - 2, role["d"]),
+                "  always @(%s %s)" % (form[0], role["clk"]),
+                "    %s_q <= %s_d;" % (reg, reg)]
     return ["  always @(%s %s)" % (form[0], role["clk"]),
             "    if (%s%s) %s <= %s;"
             % ("!" if shift_on else "", role["ld"], reg,
@@ -191,13 +222,13 @@ def tap_mask(path, module_name, chain):
     return mask
 
 
-def lfsr_body(width, mask, enable, clear, reg="q", role=None, form=RISING):
+def lfsr_body(width, mask, enable, clear, reg="q", role=None, form=RISING, split=False):
     """A chain whose serial input is the parity of some of its own stages"""
     role = role or CANONICAL
     return guarded(width, clear, reg, role, form,
                    "if (%s) " % role["en"] if enable else "",
                    "%s <= {%s[%d:0], ^(%s & %d'd%d)};"
-                   % (reg, reg, width - 2, reg, width, mask))
+                   % (reg, reg, width - 2, reg, width, mask), split)
 
 
 def lfsr(width, mask, enable, clear, form=RISING):
@@ -209,12 +240,12 @@ def lfsr(width, mask, enable, clear, form=RISING):
     return "\n".join(body + ["endmodule", ""])
 
 
-def load_body(width, enable, clear, reg="q", role=None, form=RISING):
+def load_body(width, enable, clear, reg="q", role=None, form=RISING, split=False):
     """A register loaded from somewhere that is not another register"""
     role = role or CANONICAL
     return guarded(width, clear, reg, role, form,
                    "if (%s) " % role["en"] if enable else "",
-                   "%s <= %s;" % (reg, role["d"]))
+                   "%s <= %s;" % (reg, role["d"]), split)
 
 
 def register(width, enable, clear, form=RISING):
@@ -299,7 +330,7 @@ def lift_banks(netlist, regions, workdir, taken=()):
     return found, skipped
 
 
-def count_body(width, clear, en, updown, step, reg="q", role=None, form=RISING):
+def count_body(width, clear, en, updown, step, reg="q", role=None, form=RISING, split=False):
     """A register that walks its own value on, the shape of every counter"""
     role = dict(CANONICAL, **(role or {}))
     if updown is None:
@@ -308,7 +339,7 @@ def count_body(width, clear, en, updown, step, reg="q", role=None, form=RISING):
         move = ("%s <= %s ? %s + %d'd1 : %s - %d'd1;"
                 % (reg, role.get(updown, updown), reg, width, reg, width))
     return guarded(width, clear, reg, role, form,
-                   "if (%s) " % role.get(en, en) if en else "", move)
+                   "if (%s) " % role.get(en, en) if en else "", move, split)
 
 
 def counter(width, cwidth, clear, en, updown, step, form=RISING):
@@ -1375,7 +1406,7 @@ def realign(module, ports, chains, states, banks, names, paths):
     was. Only banks are moved. A shift register's order is what it does, and a
     counter's is what it counts by; a bank alone has an order to spare.
     """
-    where = {names[index]: index for index in banks}
+    where = {"%s_q" % names[index]: index for index in banks}
     moved = {}
     for info in paths.values():
         for slot in ("a", "b"):
@@ -1499,10 +1530,10 @@ def output_wiring(ports, chains, names, seat=()):
         for role, port in info["roles"].items():
             if not numbered(role, "q"):
                 continue
-            driven[port] = ("%s%s[%d]" % (seat[index][0], role[1:],
-                                          seat[index][1])
+            driven[port] = ("%s%s_q[%d]" % (seat[index][0], role[1:],
+                                            seat[index][1])
                             if index in seat
-                            else "%s[%s]" % (names[index], role[1:]))
+                            else "%s_q[%s]" % (names[index], role[1:]))
     inputs = {bit: name for name, bit in bit_names(ports, "input").items()}
     for name, bit in sorted(bit_names(ports, "output").items()):
         if name in driven:
@@ -1627,13 +1658,15 @@ def word_shift_body(prefix, width, count, shape, feeds):
     out = []
     for at in range(width):
         reg = "%s%d" % (prefix, at)
-        piece = ["  reg [%d:0] %s;" % (count - 1, reg),
-                 "  always @(%s)" % sensitivity(role, clear, form)]
-        feed = (expr.packed("%s <= {" % reg, "    ",
-                            list(reversed(feeds)), "};") if at == 0
-                else ["%s <= %s%d;" % (reg, prefix, at - 1)])
+        piece = state_decl(count, reg)
+        piece += (expr.packed("  assign %s_d = {" % reg, "      ",
+                              list(reversed(feeds)), "};")
+                  if at == 0
+                  else ["  assign %s_d = %s%d_q;" % (reg, prefix, at - 1)])
+        piece.append("  always @(%s)" % sensitivity(role, clear, form))
+        feed = ["%s_q <= %s_d;" % (reg, reg)]
         if clear:
-            piece.append("    if (%s%s) %s <= {%d{1'b%s}};"
+            piece.append("    if (%s%s) %s_q <= {%d{1'b%s}};"
                          % ("!" if clear[1] else "", role[clear[0]], reg,
                             count, form[2] if clear[2] is None
                             else clear[2][at]))
@@ -1702,17 +1735,17 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths,
         if index in seat:
             continue
         reg = names[index]
-        piece = ["  reg [%d:0] %s;" % (info["width"] - 1, reg)]
+        piece = state_decl(info["width"], reg)
         if info.get("form") == "load":
             piece += load_shift_body(info["width"], info["shift_on"], reg,
-                                     roles[index], info["edges"])
+                                     roles[index], info["edges"], True)
         elif info.get("form") == "lfsr":
             piece += lfsr_body(info["width"], info["mask"], info["enable"],
                                info["clear"], reg, roles[index],
-                               info["edges"])
+                               info["edges"], True)
         else:
             piece += shift_body(info["width"], info["enable"], info["clear"],
-                                reg, roles[index], info["edges"])
+                                reg, roles[index], info["edges"], True)
         proven.append(piece)
     for index, info in sorted(states.items()):
         reg = names[index]
@@ -1721,25 +1754,27 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths,
             proven.append(instance(hit, reg, roles[index]))
             library += match.needs(source, hit["module"])
             continue
-        piece = ["  reg [%d:0] %s;" % (info["width"] - 1, reg)]
+        piece = state_decl(info["width"], reg)
         piece += count_body(info["width"], info["clear"], info["en"],
                             info["updown"], info["step"], reg, roles[index],
-                            info["edges"])
+                            info["edges"], True)
         proven.append(piece)
     for index, info in sorted(banks.items()):
         reg = names[index]
         role = dict(roles[index])
         role["d"] = "{%s}" % ", ".join(
             role["d%d" % i] for i in reversed(range(info["width"])))
-        piece = ["  reg [%d:0] %s;" % (info["width"] - 1, reg)]
+        piece = state_decl(info["width"], reg)
         piece += load_body(info["width"], info["enable"], info["clear"],
-                           reg, role, info["edges"])
+                           reg, role, info["edges"], True)
         proven.append(piece)
     for output, info in sorted(cones.items()):
         expr = info["form"].replace("y", output, 1) % (info["width"] + 1,
                                                        info["constant"])
         for slot, letter in enumerate("ab"):
-            expr = re.sub(r"\b%s\b" % letter, names.get(slot, letter), expr)
+            expr = re.sub(r"\b%s\b" % letter,
+                          "%s_q" % names[slot] if slot in names else letter,
+                          expr)
         proven.append(["  " + expr])
     for output, info in sorted(paths.items()):
         proven.append(["  " + datapath_line(info)])
@@ -1818,7 +1853,7 @@ def resolve(module, ports, chains, states, banks, names):
     for index, info in every:
         for bit, flop in enumerate(info["flops"]):
             alias[module["cells"][flop]["connections"]["Q"][0]] = \
-                "%s[%d]" % (names[index], bit)
+                "%s_q[%d]" % (names[index], bit)
     drivers = driver_map(module)
     out = {}
     for index, info in every:
@@ -1994,8 +2029,8 @@ def naming(module, regions, chains, states, banks, cones, paths, names,
             # and the bit of that stage it carries, which is the other way
             # round from a chain that stands on its own.
             alias[module["cells"][flop]["connections"]["Q"][0]] = (
-                "%s%d[%d]" % (seat[index][0], bit, seat[index][1])
-                if index in seat else "%s[%d]" % (reg, bit))
+                "%s%d_q[%d]" % (seat[index][0], bit, seat[index][1])
+                if index in seat else "%s_q[%d]" % (reg, bit))
     for region in regions:
         if region["kind"] == "cone" and region["output"] in set(cones) | set(paths):
             skip |= exclusive(module, set(region["cells"]))
