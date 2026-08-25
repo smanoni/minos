@@ -731,6 +731,16 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
         if not group:
             continue
         drives = set(heads[at] for at in group if heads[at])
+        # A piece can declare a net of its own on the way to what it makes: a
+        # register written with its next value named declares that wire beside
+        # itself. Declared here it is made here, and wiring it in as a port as
+        # well leaves the section holding two of it, one an input and one
+        # driven, which yosys reads as a conflict and a simulator as an error.
+        for at in group:
+            for line in items[at]:
+                got = DECL.match(line)
+                if got:
+                    drives.add(got.group(3))
         length = sum(len(items[at]) for at in group)
         if length < PIECE:
             continue
@@ -819,9 +829,24 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
 
 
 def made(lines):
-    """The net a recovered region drives, which is what it defines"""
+    """The net a recovered region drives, which is what it defines.
+
+    A register is what the piece defines even where the piece also drives a
+    wire on its way there. Written the way its sources write one, a register
+    gives its next value a name and takes it in a block of its own, so the
+    piece holds an `assign` before the `<=`; keyed on the wire, the register
+    itself belongs to nothing and is left named at the top and declared
+    nowhere. The wire never leaves the piece, so the register is the answer.
+    """
     for line in lines:
-        got = DRIVEN.match(line) or re.match(r"^\s*assign\s+(\w+)", line)
+        # Anywhere in the line, not only at the front of it: a register with a
+        # reset takes its value after an `if` or an `else`, so anchoring here
+        # finds nothing and the wire beside it answers instead.
+        got = re.search(r"(\w+)\s*<=", line)
+        if got:
+            return got.group(1)
+    for line in lines:
+        got = re.match(r"^\s*assign\s+(\w+)", line)
         if got:
             return got.group(1)
     for line in lines:
