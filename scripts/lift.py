@@ -1730,11 +1730,21 @@ def role_nets(module, info, alias, ports, kind, drivers):
 
 
 def exclusive(module, inside):
-    """Cells of a region whose results nothing outside the region reads.
+    """Cells of a region whose results nothing the region leaves behind reads.
 
     A template speaks for the cells it replaced, but only those: logic that
     also feeds elsewhere has to stay, or the rest of the module loses a
     driver and what gets written out is no longer the design.
+
+    Which cells stay has to be settled together rather than one at a time. A
+    cell kept because something outside reads it still reads its own inputs,
+    and if one of those came from a cell dropped in the same pass, the text
+    left behind reads a net nothing drives. So a cell is dropped only once
+    every reader of its result has been dropped as well, which takes as many
+    rounds as the chain is deep: present's ciphertext is sixty-four exclusive
+    ors each fed by an inverter, the exclusive ors are read elsewhere and the
+    inverters are not, and the first reading of this dropped all sixty-four
+    inverters out from under the gates that were the only things reading them.
     """
     cells = module["cells"]
     readers = collections.defaultdict(set)
@@ -1743,17 +1753,22 @@ def exclusive(module, inside):
             if cell["port_directions"].get(port) == "input":
                 for bit in bits:
                     readers[bit].add(name)
-    ports = {b for spec in module["ports"].values()
-             if spec["direction"] != "input" for b in spec["bits"]}
-    keep = set()
-    for name in inside:
+
+    def held(name, drop):
+        """Whether anything still standing reads what this cell puts out"""
         for port, bits in cells[name]["connections"].items():
             if cells[name]["port_directions"].get(port) != "output":
                 continue
-            for bit in bits:
-                if (readers[bit] - inside) or (bit in ports and name not in inside):
-                    keep.add(name)
-    return inside - keep
+            if any(readers[bit] - drop for bit in bits):
+                return True
+        return False
+
+    drop = set(inside)
+    while True:
+        keep = {name for name in drop if held(name, drop)}
+        if not keep:
+            return drop
+        drop -= keep
 
 
 def naming(module, regions, chains, states, banks, cones, paths, names):
