@@ -623,7 +623,11 @@ def demand(items):
 # than found a structure.
 PIECE, PINS, PER_PIN = 8, 24, 2.0
 
-DECL = re.compile(r"^\s*(?:wire|reg)\s*(?:\[(\d+):(\d+)\])?\s*(\w+)\s*[;=]")
+# A declaration can carry a second range after the name, which is how a
+# Verilog array of words is written: the first range is one word, the
+# second is how many of them there are.
+DECL = re.compile(r"^\s*(?:wire|reg)\s*(?:\[(\d+):(\d+)\])?"
+                  r"\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;=]")
 DRIVEN = re.compile(r"^\s*(\w+)\s*<=")
 
 
@@ -841,8 +845,12 @@ def made(lines):
     for line in lines:
         # Anywhere in the line, not only at the front of it: a register with a
         # reset takes its value after an `if` or an `else`, so anchoring here
-        # finds nothing and the wire beside it answers instead.
-        got = re.search(r"(\w+)\s*<=", line)
+        # finds nothing and the wire beside it answers instead. An `assign` is
+        # passed over, since `<=` inside one is a comparison and not a
+        # register taking anything.
+        if line.lstrip().startswith("assign"):
+            continue
+        got = re.search(r"(\w+)(?:\s*\[[^\]]*\])?\s*<=", line)
         if got:
             return got.group(1)
     for line in lines:
