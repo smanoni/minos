@@ -72,6 +72,19 @@ ROLES = {
     "%s ? %s : %s": ["en", "next"],
 }
 
+# How many alike words under separate control it takes before they are read as
+# a memory rather than as registers that happen to agree. Register aggregation
+# (Sisco et al., arXiv 2409.03119) builds a register file out of like-shaped
+# word groups sharing a decoder; below a handful of entries the same evidence
+# is as easily two registers written the same way.
+MEMORY = 4
+
+# An entry of an array, as the grading record has to spell it. Every other pass
+# reads a register by the name the text gives it, and the text calls this one
+# entry three of mem0; a grader asks instead which word a flop went into, and
+# splits a name at its first bracket to find out.
+ENTRY = re.compile(r"^(\w+)\[(\d+)\](\[\d+\])$")
+
 NUMBERED = re.compile(r"^n(\d+)$")
 INDEXED = re.compile(r"^(\w+(?:\[\d+\])?)\[(\d+)\]$")
 
@@ -84,6 +97,40 @@ def gathered(col):
     if [int(m.group(2)) for m in got] != list(range(len(col))):
         return None
     return got[0].group(1)
+
+
+def plainly(word):
+    """A word's name with no index in it, which a name built on it needs.
+
+    An entry of an array is spelt with brackets, and a name made by putting
+    something after that is not an identifier at all: the operand of mem0[3]
+    has to be called mem0_3_in0 rather than mem0[3]_in0, which reads as two
+    names with nothing between them.
+    """
+    return re.sub(r"\[(\d+)\]", r"_\1", word)
+
+
+def memories(rows):
+    """Rows alike in everything but their control, which is one array.
+
+    A register file is written once and indexed, and synthesis hands it back
+    as one word per entry: every entry is the same width, on the same edge,
+    under the same reset, taking the same shape, and differs only in the
+    gated clock or the enable that says which entry is being written. Those
+    are the entries of an array, and open8 declares eleven eight bit words
+    where its author declared one register file.
+
+    The entries come back in the order they were found. Which address selects
+    which entry is not recovered here, and numbering them as though it were
+    would be a claim about the netlist that nothing has asked it for.
+    """
+    family = collections.defaultdict(list)
+    for at, (word, key, members, mixed) in enumerate(rows):
+        if len(members) < 2:
+            continue
+        family[(len(members), key[0], key[2], key[3], key[4], key[6])].append(at)
+    return [(key[0], family[key]) for key in sorted(family, key=str)
+            if len(family[key]) >= MEMORY]
 
 
 def outline(text):
@@ -705,7 +752,8 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
     def touches(lines):
         return set(BASE.findall("\n".join(lines)))
 
-    arrays = {got.group(3) for line in list(wires)
+    arrays = {got.group(3)
+              for line in list(wires) + [one for lines in items for one in lines]
               for got in [DECL.match(line)] if got and got.group(4)}
     reads = [touches(lines) for lines in items]
     label = sections([(items[at], heads[at], reads[at])
@@ -779,6 +827,8 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
         ins = sorted(set(ins))
         pins = len(ins) + len(outs)
         if pins > PINS or pins == 0 or length < PER_PIN * pins:
+            continue
+        if any(wide.get(pin, ("", 1, ""))[2] for pin in ins + outs):
             continue
 
         # What a name was declared as out here it stays inside: a register
@@ -1309,6 +1359,21 @@ def transcribe(path, skip, alias, label=None, proven=(), record=None):
         named[cell["connections"]["Q"][0]] = "%s[%d]" % (word, len(held))
         rows[at] = (word, rkey, held + list(members), True)
 
+    # Words that differ only in what selects them are the entries of one
+    # array, declared once and indexed rather than written out one apiece.
+    entries = set()
+    for at, (width, group) in enumerate(memories(rows)):
+        name = "mem%d" % at
+        wires.append("  reg [%d:0] %s [0:%d];"
+                     % (width - 1, name, len(group) - 1))
+        for slot, which in enumerate(group):
+            word, key, members, mixed = rows[which]
+            word = "%s[%d]" % (name, slot)
+            entries.add(word)
+            for bit, (_, cell) in enumerate(members):
+                named[cell["connections"]["Q"][0]] = "%s[%d]" % (word, bit)
+            rows[which] = (word, key, members, mixed)
+
     # Each operand a row reads takes the row's name and the part it plays, so
     # a column of numbers becomes a word with a name. Only a column that is
     # nets all the way across is named: one carrying worked-out terms has no
@@ -1344,9 +1409,10 @@ def transcribe(path, skip, alias, label=None, proven=(), record=None):
             spare += 1
             if any(b in label or b in named for b in back):
                 continue
-            buses["%s_%s" % (word, role)] = len(members)
+            base = plainly(word)
+            buses["%s_%s" % (base, role)] = len(members)
             for slot2, b in enumerate(back):
-                label[b] = "%s_%s[%d]" % (word, role, slot2)
+                label[b] = "%s_%s[%d]" % (base, role, slot2)
     for name, wide in buses.items():
         wires.append("  wire [%d:0] %s;" % (wide - 1, name))
 
@@ -1444,7 +1510,8 @@ def transcribe(path, skip, alias, label=None, proven=(), record=None):
                                      for _, c in members],
                            ["%s[%d]" % (word, i) for i in range(wide)])
             data = key[-1] % tuple(word if c is None else c for c in cols)
-        wires.append("  reg [%d:0] %s;" % (wide - 1, word))
+        if word not in entries:
+            wires.append("  reg [%d:0] %s;" % (wide - 1, word))
         if redge is None:
             blocks.append(["  always @(%s %s)" % (edge, clock)]
                           + moves("    ", word, data))
@@ -1509,7 +1576,8 @@ def transcribe(path, skip, alias, label=None, proven=(), record=None):
     if record is not None:
         record.update(words)
     if path.endswith("_generic.json"):
-        json.dump({str(bit): name for bit, name in words.items()},
+        json.dump({str(bit): ENTRY.sub(r"\1_\2\3", name)
+                   for bit, name in words.items()},
                   open(path[:-len("_generic.json")] + "_words.json", "w"),
                   indent=1, sort_keys=True)
 
