@@ -27,7 +27,7 @@ IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 # name and not an index into anything. They are kept, since a register left out
 # here is a register left unstarted, holding no value and agreeing with nothing.
 DECL = re.compile(r"^\s*reg\s+(?:\[(\d+):0\]\s*)?"
-                  r"(\\\S+|[A-Za-z_][A-Za-z0-9_$]*)\s*;", re.M)
+                  r"(\\\S+|[A-Za-z_][A-Za-z0-9_$]*)\s*(\[0:(\d+)\]\s*)?;", re.M)
 ANY_DECL = re.compile(r"^\s*reg\s[^;]*;", re.M)
 
 # A section this flow pulled out into a module of its own, and the name the
@@ -38,8 +38,27 @@ PART = re.compile(r"^\s*(\w+_part\d+)\s+(u_part\d+)\s*\(", re.M)
 # Inside such a module a register that leaves it is declared as its output,
 # so the plain form above does not find it and the register goes unstarted.
 INNER = re.compile(r"^\s*(?:output\s+)?reg\s+(?:\[(\d+):0\]\s*)?"
-                   r"(\\\S+|[A-Za-z_][A-Za-z0-9_$]*)\s*;", re.M)
+                   r"(\\\S+|[A-Za-z_][A-Za-z0-9_$]*)\s*(\[0:(\d+)\]\s*)?;", re.M)
 ANY_INNER = re.compile(r"^\s*(?:output\s+)?reg\s[^;]*;", re.M)
+
+
+def spread(found):
+    """A declaration per register, with an array written out one entry apiece.
+
+    A testbench reaches into the design one register at a time: it starts each
+    from a value and watches it move, and neither can be done to an array as a
+    whole. Each entry is a register in its own right and is given back as one.
+    """
+    out = []
+    for width, name, _, deep in found:
+        bits = int(width) + 1 if width else 1
+        if not deep:
+            out.append((name, bits))
+            continue
+        if name.startswith("\\"):
+            return None
+        out += [("%s[%d]" % (name, at), bits) for at in range(int(deep) + 1)]
+    return out
 
 
 def registers(lifted):
@@ -64,9 +83,8 @@ def registers(lifted):
     """
     whole = open(lifted).read()
     text = whole.split("\nendmodule")[0]
-    got = [(name, int(width) + 1 if width else 1)
-           for width, name in DECL.findall(text)]
-    if len(got) != len(ANY_DECL.findall(text)):
+    got = spread(DECL.findall(text))
+    if got is None or len(ANY_DECL.findall(text)) != len(DECL.findall(text)):
         return None
     # A section written as a module of its own is still this design's state,
     # and a testbench reaches it through the instance. Left out, those
@@ -79,9 +97,8 @@ def registers(lifted):
         body = bodies.get(kind)
         if body is None:
             continue
-        inner = [(name, int(width) + 1 if width else 1)
-                 for width, name in INNER.findall(body)]
-        if len(inner) != len(ANY_INNER.findall(body)):
+        inner = spread(INNER.findall(body))
+        if inner is None or len(ANY_INNER.findall(body)) != len(INNER.findall(body)):
             return None
         got += [("%s.%s" % (tag, name), width) for name, width in inner]
     return got

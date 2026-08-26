@@ -48,7 +48,7 @@ def binding(need, port):
     return need[port] if isinstance(need, dict) else need
 
 
-TERM = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*(?:\[\d+\])?")
+TERM = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*(?:\[\d+\]){0,2}")
 
 # What a shape is called once a row of registers is found sharing it. Synthesis
 # splits a word into bits and scatters them, so what was one line of the design
@@ -73,7 +73,7 @@ ROLES = {
 }
 
 NUMBERED = re.compile(r"^n(\d+)$")
-INDEXED = re.compile(r"^(\w+)\[(\d+)\]$")
+INDEXED = re.compile(r"^(\w+(?:\[\d+\])?)\[(\d+)\]$")
 
 
 def gathered(col):
@@ -627,32 +627,44 @@ PIECE, PINS, PER_PIN = 8, 24, 2.0
 # Verilog array of words is written: the first range is one word, the
 # second is how many of them there are.
 DECL = re.compile(r"^\s*(?:wire|reg)\s*(?:\[(\d+):(\d+)\])?"
-                  r"\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;=]")
-DRIVEN = re.compile(r"^\s*(\w+)\s*<=")
+                  r"\s*(\w+)\s*(\[[^\]]*\])?\s*[;=]")
+DRIVEN = re.compile(r"^\s*(\w+)(?:\s*\[[^\]]*\])?\s*<=")
 
 
 def spans(module, wires, proven):
-    """How each name was declared: the span to repeat, and how many bits.
+    """How each name was declared: the span to repeat, how many bits, how many of it.
 
     The span is carried as it was written rather than worked out again from
     the count. A one bit region is declared [0:0] and indexed [0], and given
     back as a plain scalar it cannot be indexed at all.
+
+    A declaration can carry a second range after the name, which is an array
+    of that many words. Nothing can be said about such a name from its width
+    alone, so the range comes back beside it: a port cannot carry one, and a
+    caller has to know that before it writes one down as a port.
     """
     wide = {}
     for name, spec in module.get("ports", {}).items():
         many = len(spec["bits"])
-        wide[name] = ("" if many == 1 else "[%d:0] " % (many - 1), many)
+        wide[name] = ("" if many == 1 else "[%d:0] " % (many - 1), many, "")
     for line in list(wires) + [one for piece in proven for one in piece]:
         got = DECL.match(line)
         if got:
-            hi, lo, name = got.groups()
+            hi, lo, name, deep = got.groups()
             wide[name] = (("" if hi is None else "[%s:%s] " % (hi, lo)),
-                          1 if hi is None else abs(int(hi) - int(lo)) + 1)
+                          1 if hi is None else abs(int(hi) - int(lo)) + 1,
+                          deep or "")
     return wide
 
 
 def held(lines):
-    """The register a block drives, which is what that block defines"""
+    """The register a block drives, which is what that block defines.
+
+    An entry of an array is the array, which is what has to be declared and
+    what a section would have to carry: a block writing one drives a name and
+    not nothing, and read as nothing it would be moved about as though it
+    defined no register at all.
+    """
     for line in lines:
         got = DRIVEN.match(line)
         if got:
@@ -674,6 +686,10 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
     being separate. What it cannot take goes on without it: a net driven from
     two groups at once, or a port it drives only part of, stays where it was
     rather than costing the whole group its module.
+
+    An array is a third such thing, and a stronger one: Verilog has no port
+    that carries a range after its name, so neither the lines that write one
+    nor the lines that read one can cross a module boundary at all.
     """
     kinds, items, heads = [], [], []
     for lines, name in defs:
@@ -689,6 +705,8 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
     def touches(lines):
         return set(BASE.findall("\n".join(lines)))
 
+    arrays = {got.group(3) for line in list(wires)
+              for got in [DECL.match(line)] if got and got.group(4)}
     reads = [touches(lines) for lines in items]
     label = sections([(items[at], heads[at], reads[at])
                       for at in range(len(items))])
@@ -731,6 +749,7 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
     for one in sorted(members):
         group = [at for at in members[one]
                  if heads[at] not in shared
+                 and not arrays & reads[at]
                  and (heads[at] not in port or entire.get(heads[at]) == one)]
         if not group:
             continue
@@ -903,9 +922,10 @@ def prune(defs, blocks, proven, keep):
 # The three shapes a register block is written in here: what it takes, what
 # it takes under an enable, and either of those behind a reset.
 HEAD = re.compile(r"^(\s*)always @\((.*)\)\s*$")
-TAKES = re.compile(r"^(\s*)([A-Za-z_][\w$]*)\s*<=\s")
+TAKES = re.compile(r"^(\s*)([A-Za-z_][\w$]*(?:\[\d+\])?)\s*<=\s")
 ASKS = re.compile(r"^(\s*)if \((.*)\)\s*$")
-CLEARS = re.compile(r"^(\s*)if \((.*?)\)\s+([A-Za-z_][\w$]*)\s*<=\s*(.*;)\s*$")
+CLEARS = re.compile(r"^(\s*)if \((.*?)\)\s+([A-Za-z_][\w$]*(?:\[\d+\])?)"
+                    r"\s*<=\s*(.*;)\s*$")
 OTHERWISE = re.compile(r"^(\s*)else\s*$")
 
 

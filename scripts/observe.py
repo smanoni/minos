@@ -206,6 +206,12 @@ def main(netlist, lifted, outdir):
         if name in kept or any(name.startswith(p + "_") for p in kept):
             noted.append((name, kind))
             continue
+        # An entry of an array answers to the array's name and its place in
+        # it, and neither half means anything without the other: renamed on
+        # its own it would leave the array declared and nothing writing it.
+        if "[" in name:
+            noted.append((name, kind))
+            continue
         index = count.get(kind, 0)
         while "%s%d" % (kind, index) in words:
             index += 1
