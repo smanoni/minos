@@ -1675,7 +1675,7 @@ def word_shift_body(prefix, width, count, shape, feeds):
         start = [form[2] if clear[2] is None else clear[2][at]
                  for at in range(width)]
         ask = "%s%s" % ("!" if clear[1] else "", role[clear[0]])
-        if len(set(start)) == 1:
+        if len(set(start)) == 1 and width > 2:
             out += ["    if (%s)" % ask,
                     "      %s" % loop(prefix, 0, width),
                     "        %sq[%si] <= {%d{1'b%s}};"
