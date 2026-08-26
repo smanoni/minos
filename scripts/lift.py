@@ -1530,8 +1530,8 @@ def output_wiring(ports, chains, names, seat=()):
         for role, port in info["roles"].items():
             if not numbered(role, "q"):
                 continue
-            driven[port] = ("%s%s_q[%d]" % (seat[index][0], role[1:],
-                                            seat[index][1])
+            driven[port] = ("%sq[%s][%d]" % (seat[index][0], role[1:],
+                                             seat[index][1])
                             if index in seat
                             else "%s_q[%s]" % (names[index], role[1:]))
     inputs = {bit: name for name, bit in bit_names(ports, "input").items()}
@@ -1641,42 +1641,70 @@ def chain_words(chains, roles, names):
 
 
 def word_shift_body(prefix, width, count, shape, feeds):
-    """A family of chains as one register per stage, the newest stage first.
+    """A family of chains as an array of stages, written with the loop it is.
 
-    Each stage is a piece of its own, as every other template is: a piece that
-    drove several registers would be pulled into a section by the first of
-    them and leave the rest named at the top and declared nowhere. Written one
-    apiece they are merged again by whatever merges always blocks, so the
-    reader sees the one block the design wrote.
+    A pipeline is one register per stage and every stage but the first takes
+    the stage before it, which is a copy of one body as many times as the
+    pipeline is deep. Declared as an array the stages are indexed rather than
+    numbered into names, and then the copies are a loop: des's key schedule is
+    a fifty-six bit word shifted sixteen times, and reads as that instead of
+    as sixteen blocks that differ only in a digit.
+
+    The whole family is one piece. An array cannot cross a module boundary,
+    so nothing can pull half of it into a section and leave the rest named at
+    the top and declared nowhere, which is what writing a stage apiece was
+    guarding against.
 
     The reset arm composes because a stage resets uniformly across the word: a
     register with a reset pin holds one value in every bit, and a region held
     at a constant holds that constant's bit for the stage, the same bit for
-    every chain in the family.
+    every chain in the family. Where the stages hold different bits the loop
+    is worth nothing over them and they are written out one apiece instead,
+    and the same for a family too shallow for a loop to say anything: two
+    stages written as a loop of one turn is a longer way to say one line.
     """
     form, clear, role = shape
-    out = []
-    for at in range(width):
-        reg = "%s%d" % (prefix, at)
-        piece = state_decl(count, reg)
-        piece += (expr.packed("  assign %s_d = {" % reg, "      ",
-                              list(reversed(feeds)), "};")
-                  if at == 0
-                  else ["  assign %s_d = %s%d_q;" % (reg, prefix, at - 1)])
-        piece.append("  always @(%s)" % sensitivity(role, clear, form))
-        feed = ["%s_q <= %s_d;" % (reg, reg)]
-        if clear:
-            piece.append("    if (%s%s) %s_q <= {%d{1'b%s}};"
-                         % ("!" if clear[1] else "", role[clear[0]], reg,
-                            count, form[2] if clear[2] is None
-                            else clear[2][at]))
-            piece.append("    else " + feed[0])
-            piece += ["    " + one for one in feed[1:]]
+    span = "[%d:0] " % (count - 1)
+    out = ["  wire %s%sd;" % (span, prefix),
+           "  reg %s%sq [0:%d];" % (span, prefix, width - 1)]
+    out += expr.packed("  assign %sd = {" % prefix, "      ",
+                       list(reversed(feeds)), "};")
+    out.append("  always @(%s) begin" % sensitivity(role, clear, form))
+    step = "    "
+    if clear:
+        start = [form[2] if clear[2] is None else clear[2][at]
+                 for at in range(width)]
+        ask = "%s%s" % ("!" if clear[1] else "", role[clear[0]])
+        if len(set(start)) == 1:
+            out += ["    if (%s)" % ask,
+                    "      %s" % loop(prefix, 0, width),
+                    "        %sq[%si] <= {%d{1'b%s}};"
+                    % (prefix, prefix, count, start[0]),
+                    "    else begin"]
         else:
-            piece.append("    " + feed[0])
-            piece += ["    " + one for one in feed[1:]]
-        out.append(piece)
+            out += ["    if (%s) begin" % ask]
+            out += ["      %sq[%d] <= {%d{1'b%s}};"
+                    % (prefix, at, count, start[at]) for at in range(width)]
+            out += ["    end else begin"]
+        step = "      "
+    out.append("%s%sq[0] <= %sd;" % (step, prefix, prefix))
+    if width > 2:
+        out += ["%s%s" % (step, loop(prefix, 1, width)),
+                "%s  %sq[%si] <= %sq[%si-1];"
+                % (step, prefix, prefix, prefix, prefix)]
+    else:
+        out += ["%s%sq[%d] <= %sq[%d];" % (step, prefix, at, prefix, at - 1)
+                for at in range(1, width)]
+    out += (["    end"] if clear else []) + ["  end"]
+    if any(one.lstrip().startswith("for (") for one in out):
+        out.insert(2, "  integer %si;" % prefix)
     return out
+
+
+def loop(prefix, first, width):
+    """The head of the loop a family's stages are written under"""
+    return ("for (%si = %d; %si < %d; %si = %si + 1)"
+            % (prefix, first, prefix, width, prefix, prefix))
 
 
 def register_names(module, ports, chains, states, banks):
@@ -1728,9 +1756,9 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths,
     # logic they read.
     proven = []
     for prefix, (width, count, shape, members) in sorted(across.items()):
-        proven += word_shift_body(
+        proven.append(word_shift_body(
             prefix, width, count, shape,
-            [roles[index]["d"] for index in members])
+            [roles[index]["d"] for index in members]))
     for index, info in sorted(chains.items()):
         if index in seat:
             continue
@@ -2029,7 +2057,7 @@ def naming(module, regions, chains, states, banks, cones, paths, names,
             # and the bit of that stage it carries, which is the other way
             # round from a chain that stands on its own.
             alias[module["cells"][flop]["connections"]["Q"][0]] = (
-                "%s%d_q[%d]" % (seat[index][0], bit, seat[index][1])
+                "%sq[%d][%d]" % (seat[index][0], bit, seat[index][1])
                 if index in seat else "%s_q[%d]" % (reg, bit))
     for region in regions:
         if region["kind"] == "cone" and region["output"] in set(cones) | set(paths):
