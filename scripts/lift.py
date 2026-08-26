@@ -8,6 +8,7 @@
 
 import sys
 import os
+import itertools
 import json
 import re
 import collections
@@ -1435,6 +1436,298 @@ def realign(module, ports, chains, states, banks, names, paths):
     return resolve(module, ports, chains, states, banks, names)
 
 
+# A cone's table doubles with every net it bottoms out on: sixteen of them is
+# sixty-five thousand rows and instant, and a cone standing on more than that
+# is a function of too much to be read as a selection. A control wider than
+# four selects more arms than a design would ever write out.
+TABLE_CAP, CONTROL_CAP = 16, 4
+
+
+def row_axis(place, many):
+    """The rows of a table of `many` nets in which one of them stands high"""
+    period = 1 << (place + 1)
+    block = ((1 << (1 << place)) - 1) << (1 << place)
+    out = 0
+    for step in range(1 << (many - place - 1)):
+        out |= block << (step * period)
+    return out
+
+
+def gate_value(cell, val, full):
+    """One gate's column of a table, worked out from its inputs' columns"""
+    kind = cell["type"]
+    if kind in expr.REDUCE:
+        bits = [val[b] for b in cell["connections"]["A"]]
+        if kind == "$reduce_and":
+            out = full
+            for one in bits:
+                out &= one
+            return out
+        out = 0
+        for one in bits:
+            out = out ^ one if kind in ("$reduce_xor", "$reduce_xnor") \
+                else out | one
+        return full & ~out if kind == "$reduce_xnor" else out
+    pin = cell["connections"]
+    a = val[pin["A"][0]] if "A" in pin else 0
+    b = val[pin["B"][0]] if "B" in pin else 0
+    sel = val[pin["S"][0]] if "S" in pin else 0
+    if kind == "$_AND_":
+        return a & b
+    if kind == "$_OR_":
+        return a | b
+    if kind == "$_XOR_":
+        return a ^ b
+    if kind == "$_XNOR_":
+        return full & ~(a ^ b)
+    if kind == "$_NAND_":
+        return full & ~(a & b)
+    if kind == "$_NOR_":
+        return full & ~(a | b)
+    if kind == "$_ANDNOT_":
+        return a & (full & ~b)
+    if kind == "$_ORNOT_":
+        return a | (full & ~b)
+    if kind == "$_NOT_":
+        return full & ~a
+    if kind == "$_MUX_":
+        return (sel & b) | ((full & ~sel) & a)
+    if kind == "$_NMUX_":
+        return full & ~((sel & b) | ((full & ~sel) & a))
+    return None
+
+
+def cone_table(module, drive, bit, support, full):
+    """What a bit does, as one answer for every value its nets can take.
+
+    Carried as one integer of 2**len(support) bits rather than a list, so a
+    whole column is a machine word and holding a net still is a mask.
+
+    Walked with a stack rather than by recursion: a cone here is thousands of
+    gates deep and Python would give up long before the cone did.
+    """
+    cells = module["cells"]
+    val = {net: row_axis(at, len(support)) for at, net in enumerate(support)}
+    stack = [bit]
+    while stack:
+        net = stack[-1]
+        if net in val:
+            stack.pop()
+            continue
+        if not isinstance(net, int):
+            val[net] = full if str(net) == "1" else 0
+            stack.pop()
+            continue
+        src = drive.get(net)
+        if src is None:
+            val[net] = 0
+            stack.pop()
+            continue
+        want = [b for port, conn in cells[src]["connections"].items()
+                for b in conn
+                if cells[src]["port_directions"].get(port) == "input"
+                and b not in val]
+        if want:
+            stack += want
+            continue
+        got = gate_value(cells[src], val, full)
+        if got is None:
+            return None
+        val[net] = got
+        stack.pop()
+    return val[bit]
+
+
+def true_nets(table, support, full):
+    """The nets a table turns on, which is fewer than it was built over"""
+    out = []
+    for at, net in enumerate(support):
+        high = row_axis(at, len(support))
+        if ((table & high) >> (1 << at)) != (table & (full & ~high)):
+            out.append(net)
+    return out
+
+
+def branch_reading(table, support, full, control):
+    """What each arm of a case over these nets says, or None if it says nothing.
+
+    An arm is worth writing only where holding the control still leaves the
+    bit a function of one net or of none: a constant, a net, or a net
+    inverted. Two nets left over is not a selection, it is the logic the
+    selection was supposed to stand in for.
+    """
+    place = {net: at for at, net in enumerate(support)}
+    arms = []
+    for value in range(1 << len(control)):
+        keep = full
+        for at, net in enumerate(control):
+            high = row_axis(place[net], len(support))
+            keep &= high if (value >> at) & 1 else (full & ~high)
+        free = [net for net in support if net not in control
+                and ((table ^ (table >> (1 << place[net])))
+                     & keep & (full & ~row_axis(place[net], len(support))))]
+        if len(free) > 1:
+            return None
+        if not free:
+            held = table & keep
+            if held == 0:
+                arms.append(("0", False))
+            elif held == keep:
+                arms.append(("1", False))
+            else:
+                return None
+            continue
+        net = free[0]
+        high = row_axis(place[net], len(support))
+        on, off = table & keep & high, table & keep & (full & ~high)
+        if on == (keep & high) and off == 0:
+            arms.append((net, False))
+        elif on == 0 and off == (keep & (full & ~high)):
+            arms.append((net, True))
+        else:
+            return None
+    return arms
+
+
+def select_control(bits, shared):
+    """The fewest nets this cone is a case over, where it is a case at all.
+
+    Each bit is asked in its own nets and not in the cone's together. Eight
+    bits standing on three shared nets and four of their own apiece is
+    thirty-five nets between them and a table too wide to build, where each
+    bit on its own is seven and instant.
+    """
+    for many in range(1, min(CONTROL_CAP, len(shared)) + 1):
+        for control in itertools.combinations(shared, many):
+            read = [branch_reading(table, support, full, control)
+                    for table, support, full in bits]
+            if all(arm is not None for arm in read):
+                return control, read
+    return None, None
+
+
+def select_wrapper(name, inner, ins, y):
+    """Names every input the region takes as one bus, and its result as another.
+
+    A cone is read here as a whole rather than as two operands, so there is
+    nothing to tell apart and nothing to leave over: what a case is proven
+    against is the region taking everything it takes.
+    """
+    conn = {}
+    for at, port in enumerate(ins):
+        conn[port] = "x[%d]" % at
+    for at, port in enumerate(y):
+        conn[port] = "y[%d]" % at
+    return "\n".join([
+        "module %s(x, y);" % name,
+        "  input [%d:0] x;" % (len(ins) - 1),
+        "  output [%d:0] y;" % (len(y) - 1),
+        "  %s i_dut (%s);" % (inner, ", ".join(
+            ".%s(%s)" % (match.escape(port), wire)
+            for port, wire in sorted(conn.items()))),
+        "endmodule", ""])
+
+
+def arm_terms(arms, spell):
+    """One arm of a case, as the word the cone puts out under that control"""
+    out = []
+    for net, flipped in arms:
+        if net in ("0", "1"):
+            out.append("1'b%s" % net)
+        else:
+            out.append("%s%s" % ("~" if flipped else "", spell(net)))
+    return out[0] if len(out) == 1 else "{%s}" % ", ".join(reversed(out))
+
+
+def case_lines(control, arms, spell, head):
+    """A case over the nets a cone selects on, one arm per value they take"""
+    out = ["  always @* case ({%s})" % ", ".join(
+        spell(net) for net in reversed(control))]
+    for value in range(1 << len(control)):
+        out.append("    %d'd%d: %s = %s;"
+                   % (len(control), value, head,
+                      arm_terms([one[value] for one in arms], spell)))
+    return out + ["  endcase"]
+
+
+def select_candidate(control, arms, seats, width, many):
+    """The case a cone was read as, written against the bus it is proved on"""
+    body = ["module cand(x, y);",
+            "  input [%d:0] x;" % (many - 1),
+            "  output reg [%d:0] y;" % (width - 1)]
+    body += case_lines(control, arms, lambda net: "x[%d]" % seats[net], "y")
+    return "\n".join(body + ["endmodule", ""])
+
+
+def lift_selects(netlist, regions, workdir, done):
+    """A case for every cone that turns out to be a selection over a few nets.
+
+    A cone whose bits all stand on the same handful of nets, and which each
+    become a net or a constant once those are held, is a case over them. The
+    control is read off the cone rather than guessed at, and so is every arm:
+    what is searched for is only how many nets the control takes.
+    """
+    found = {}
+    for index, region in enumerate(regions):
+        if region["kind"] != "cone" or region["output"] in done:
+            continue
+        got = match.extract(netlist, region, index, workdir)
+        if not got:
+            continue
+        path, name = got
+        inner = json.load(open(path))["modules"][name]
+        outs = port_buses(path, name, "output")
+        ins = port_buses(path, name, "input")
+        y = output_bus(region, outs)
+        if y is None or len(y) < 2 or not ins:
+            continue
+        taken = [port for base in sorted(ins) for port in ins[base]]
+        seats = {inner["ports"][port]["bits"][0]: at
+                 for at, port in enumerate(taken)}
+        drive = driver_map(inner)
+        bits, shared = [], None
+        for port in y:
+            bit = inner["ports"][port]["bits"][0]
+            support = leaves(inner, drive, bit, TABLE_CAP)
+            if not support or any(net not in seats for net in support):
+                bits = None
+                break
+            full = (1 << (1 << len(support))) - 1
+            table = cone_table(inner, drive, bit, support, full)
+            if table is None:
+                bits = None
+                break
+            bits.append((table, support, full))
+            stands = set(true_nets(table, support, full))
+            shared = stands if shared is None else shared & stands
+        if not bits or not shared:
+            continue
+        control, arms = select_control(bits, sorted(shared))
+        if control is None:
+            print("  cone %-12s no selecting form" % region["output"])
+            continue
+        text = select_candidate(control, arms, seats, len(y), len(taken))
+        wrap = "%s/sel_%d_wrap.v" % (workdir, index)
+        open(wrap, "w").write(select_wrapper("gold", name, taken, y))
+        gold = "%s/sel_%d_gold.json" % (workdir, index)
+        code, log = match.yosys(
+            ["read_json %s" % path, "read_verilog %s" % wrap,
+             "hierarchy -top gold", "flatten", "opt_clean",
+             "write_json %s" % gold],
+            "%s/sel_%d_wrap.ys" % (workdir, index))
+        if code:
+            continue
+        verdict = prove_candidate(text, gold, workdir, "sel_%d" % index)
+        print("  cone %-12s case over %d net%s  %s"
+              % (region["output"], len(control),
+                 "" if len(control) == 1 else "s", verdict))
+        if verdict == "PROVEN EQUIVALENT":
+            found[region["output"]] = {
+                "label": "case", "control": list(control), "arms": arms,
+                "seats": seats, "y": y, "taken": taken, "text": text}
+    return found
+
+
 def lift_datapaths(netlist, regions, workdir, done, regs=()):
     """An arithmetic form for every output bus that proves equivalent"""
     top = list(json.load(open(netlist))["modules"].values())[0]
@@ -2148,11 +2441,13 @@ def main(netlist, regions_path, outdir, out=None):
                  ", ..." if len(regs) > len(show) else ""))
     cones = lift_cones(netlist, regions, workdir)
     paths = lift_datapaths(netlist, regions, workdir, set(cones), regs)
+    selects = lift_selects(netlist, regions, workdir,
+                           set(cones) | set(paths))
     roles.update(realign(module, module["ports"], chains, states, banks,
                          names, paths))
-    print("  %d of %d cones lifted"
-          % (len(cones) + len(paths),
-             sum(1 for r in regions if r["kind"] == "cone")))
+    print("  %d of %d cones lifted, %d of them as a case"
+          % (len(cones) + len(paths) + len(selects),
+             sum(1 for r in regions if r["kind"] == "cone"), len(selects)))
     if out:
         write_rtl(netlist, regions, chains, states, banks, cones, paths,
                   names, roles, across, seat, out)
