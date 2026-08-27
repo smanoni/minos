@@ -191,6 +191,22 @@ netlist: | $(WORKDIR)
 	$(MAKE) structure DESIGN=$(DESIGN)
 	$(MAKE) lift DESIGN=$(DESIGN)
 
+# Logic Equivalence Checking (LEC) between the extracted netlist and the generic one.
+.PHONY: lec
+lec:
+	@top=`sed -n 's/^module \\([A-Za-z_][A-Za-z0-9_]*\\).*/\\1/p' \
+		$(WORKDIR)/$(DESIGN)_generic.v | head -1`; \
+	cells=$(WORKDIR)/$(DESIGN)_cells.v; \
+	if [ -f "$$cells" ]; then read="read_verilog $$cells"; \
+	else read="$(READ_CELLS)"; fi; \
+	sed -e "s|READ_CELLS|$$read|" \
+	    -e 's|IN_V|$(WORKDIR)/$(DESIGN).v|' \
+	    -e 's|IN_GENERIC|$(WORKDIR)/$(DESIGN)_generic.v|' \
+	    -e "s|TOP|$$top|g" \
+	    $(SCRIPTS)/lec.ys > $(TMPDIR)/$(DESIGN)_lec.ys; \
+	$(YOSYS) -q -s $(TMPDIR)/$(DESIGN)_lec.ys \
+		&& echo "  $(DESIGN): extracted and generic netlists are equivalent"
+
 .PHONY: structure
 structure:
 	$(PYTHON) $(SCRIPTS)/structure.py \

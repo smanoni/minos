@@ -1,0 +1,35 @@
+# Copyright 2026 Simone Manoni.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Simone Manoni <simone.manoni2@gmail.com>
+
+READ_CELLS
+read_verilog IN_V
+hierarchy -top TOP -purge_lib
+proc
+flatten
+techmap
+opt_clean
+# The registers a layout carries reset asynchronously, and equivalence is
+# asked of a design one step at a time, which is a question a reset outside
+# the step cannot be asked. Written as logic the reset is inside the step,
+# and both sides are then the same kind of thing.
+async2sync
+design -stash gold
+
+read_verilog IN_GENERIC
+prep -top TOP -flatten
+async2sync
+design -stash gate
+
+design -copy-from gold -as TOP TOP
+design -copy-from gate -as gate TOP
+# Both sides still call a register what the layout called it, so the two are
+# matched register by register and each is proved against its own opposite.
+# That is what makes the answer hold for all time rather than to a bound.
+equiv_make TOP gate equiv
+prep -top equiv
+equiv_simple -seq 5
+equiv_induct -seq 5
+equiv_status -assert
