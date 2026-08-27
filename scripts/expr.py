@@ -1588,6 +1588,13 @@ def transcribe(path, skip, alias, label=None, proven=(), record=None):
     keep = set(module.get("ports", {}))
     keep |= {BASE.match(str(n)).group(0) for n in named.values()}
     keep |= {BASE.match(str(n)).group(0) for n in label.values()}
+    # What a proven piece reads has to survive and has to reach it. A template
+    # written against ports and registers is safe already, since those are
+    # named above; one written against plain nets is not, and the net's driver
+    # is dropped as dead or swallowed by a section that exports nothing,
+    # leaving the piece reading a name that is driven nowhere.
+    keep |= {BASE.match(one).group(0) for piece in proven for line in piece
+             for one in BASE.findall(line) if BASE.match(one)}
     for spec in module.get("ports", {}).values():
         for bit in spec["bits"]:
             keep.add(BASE.match(show(bit)).group(0))

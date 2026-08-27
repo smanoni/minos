@@ -1339,7 +1339,7 @@ def known_buses(netlist, regions, chains, states, banks, names):
     """
     module = list(json.load(open(netlist))["modules"].values())[0]
     skip, alias, label = naming(module, regions, chains, states, banks,
-                                {}, {}, names)
+                                {}, {}, {}, names)
     record = {}
     expr.transcribe(netlist, skip, alias, label, record=record)
     slots = collections.defaultdict(dict)
@@ -1650,6 +1650,17 @@ def case_lines(control, arms, spell, head):
     return out + ["  endcase"]
 
 
+def select_block(info):
+    """A proven cone written back as the case it was proved to be"""
+    target = info.get("target") or slice_of(info["y"])
+    head = "%s_sel" % re.sub(r"\W", "_", target)
+    wide = len(info["y"])
+    spell = lambda net: info["speak"][info["taken"][info["seats"][net]]]
+    out = ["  reg %s%s;" % ("" if wide == 1 else "[%d:0] " % (wide - 1), head)]
+    out += case_lines(info["control"], info["arms"], spell, head)
+    return out + ["  assign %s = %s;" % (target, head)]
+
+
 def select_candidate(control, arms, seats, width, many):
     """The case a cone was read as, written against the bus it is proved on"""
     body = ["module cand(x, y);",
@@ -1659,7 +1670,7 @@ def select_candidate(control, arms, seats, width, many):
     return "\n".join(body + ["endmodule", ""])
 
 
-def lift_selects(netlist, regions, workdir, done):
+def lift_selects(netlist, regions, workdir, done, regs=()):
     """A case for every cone that turns out to be a selection over a few nets.
 
     A cone whose bits all stand on the same handful of nets, and which each
@@ -1667,6 +1678,7 @@ def lift_selects(netlist, regions, workdir, done):
     control is read off the cone rather than guessed at, and so is every arm:
     what is searched for is only how many nets the control takes.
     """
+    top = list(json.load(open(netlist))["modules"].values())[0]
     found = {}
     for index, region in enumerate(regions):
         if region["kind"] != "cone" or region["output"] in done:
@@ -1706,6 +1718,29 @@ def lift_selects(netlist, regions, workdir, done):
         if control is None:
             print("  cone %-12s no selecting form" % region["output"])
             continue
+        # A leaf may be a register, and a register is not called in the
+        # recovered RTL what it is called in the netlist: `leaves` stops at
+        # one and hands back `n280`, which the design writes as a bit of the
+        # word it belongs to. Spelt raw it names nothing and comes back
+        # undriven, so a cone naming anything the RTL will not carry is left
+        # alone rather than written against a name that is not there.
+        named, render = read_buses(top, top["ports"], ins, regs)
+        seat = bus_seats(top, top["ports"],
+                         [p for bits in ins.values() for p in bits])
+        spelling = bit_naming(top, regs, render, seat)
+        # Only a net that has a name of its own counts. Falling back to what
+        # the region called it puts `n795` in an arm, which is the netlist's
+        # word for a net the recovered RTL never declares.
+        speak = dict(render)
+        for bit, one in seat.items():
+            if bit in spelling:
+                speak.setdefault(one, spelling[bit])
+        wanted = set(control) | {net for one in arms for net, _ in one
+                                 if net not in ("0", "1")}
+        if any(taken[seats[net]] not in speak for net in wanted):
+            print("  cone %-12s selects on nets the RTL does not name"
+                  % region["output"])
+            continue
         text = select_candidate(control, arms, seats, len(y), len(taken))
         wrap = "%s/sel_%d_wrap.v" % (workdir, index)
         open(wrap, "w").write(select_wrapper("gold", name, taken, y))
@@ -1724,7 +1759,8 @@ def lift_selects(netlist, regions, workdir, done):
         if verdict == "PROVEN EQUIVALENT":
             found[region["output"]] = {
                 "label": "case", "control": list(control), "arms": arms,
-                "seats": seats, "y": y, "taken": taken, "text": text}
+                "seats": seats, "y": y, "taken": taken,
+                "speak": speak, "text": text}
     return found
 
 
@@ -2024,7 +2060,7 @@ def register_names(module, ports, chains, states, banks):
     return names, roles
 
 
-def write_rtl(netlist, regions, chains, states, banks, cones, paths,
+def write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
               names, roles, across, seat, out):
     """Assembles the proven pieces into one readable module"""
     design = json.load(open(netlist))
@@ -2099,10 +2135,12 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths,
         proven.append(["  " + expr])
     for output, info in sorted(paths.items()):
         proven.append(["  " + datapath_line(info)])
+    for output, info in sorted(selects.items()):
+        proven.append(select_block(info))
     proven += [[one] for one in output_wiring(ports, chains, names, seat)]
     lines = [one for piece in proven for one in piece]
     rest, mods = leftover(netlist, regions, chains, states, banks, cones,
-                          paths, names, lines, proven, seat)
+                          paths, selects, names, lines, proven, seat)
     lines = head + declare(lines, ports, rest) + rest
     tail = ["endmodule", ""]
     if mods:
@@ -2327,8 +2365,8 @@ def exclusive(module, inside):
         drop -= keep
 
 
-def naming(module, regions, chains, states, banks, cones, paths, names,
-           seat=()):
+def naming(module, regions, chains, states, banks, cones, paths, selects,
+           names, seat=()):
     """What the transcription is told: which cells are done with, and by what
     name to call the nets that are left.
 
@@ -2353,7 +2391,8 @@ def naming(module, regions, chains, states, banks, cones, paths, names,
                 "%sq[%d][%d]" % (seat[index][0], bit, seat[index][1])
                 if index in seat else "%s_q[%d]" % (reg, bit))
     for region in regions:
-        if region["kind"] == "cone" and region["output"] in set(cones) | set(paths):
+        if region["kind"] == "cone" and region["output"] in (
+                set(cones) | set(paths) | set(selects)):
             skip |= exclusive(module, set(region["cells"]))
     for bit, name in port_alias(module).items():
         alias.setdefault(bit, name)
@@ -2368,7 +2407,7 @@ def naming(module, regions, chains, states, banks, cones, paths, names,
     return skip, alias, label
 
 
-def leftover(netlist, regions, chains, states, banks, cones, paths,
+def leftover(netlist, regions, chains, states, banks, cones, paths, selects,
              names, lines, proven=(), seat=()):
     """Everything no template claimed, written out as plain expressions.
 
@@ -2380,7 +2419,7 @@ def leftover(netlist, regions, chains, states, banks, cones, paths,
     module = list(design["modules"].values())[0]
     ports = module["ports"]
     skip, alias, label = naming(module, regions, chains, states, banks,
-                                cones, paths, names, seat)
+                                cones, paths, selects, names, seat)
     wires, body, taken, mods = expr.transcribe(netlist, skip, alias, label, proven)
     if not body:
         return [], []
@@ -2442,14 +2481,14 @@ def main(netlist, regions_path, outdir, out=None):
     cones = lift_cones(netlist, regions, workdir)
     paths = lift_datapaths(netlist, regions, workdir, set(cones), regs)
     selects = lift_selects(netlist, regions, workdir,
-                           set(cones) | set(paths))
+                           set(cones) | set(paths), regs)
     roles.update(realign(module, module["ports"], chains, states, banks,
                          names, paths))
     print("  %d of %d cones lifted, %d of them as a case"
           % (len(cones) + len(paths) + len(selects),
              sum(1 for r in regions if r["kind"] == "cone"), len(selects)))
     if out:
-        write_rtl(netlist, regions, chains, states, banks, cones, paths,
+        write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
                   names, roles, across, seat, out)
         verdict = prove_candidate(open(out).read().replace(
             "module %s(" % list(json.load(open(netlist))["modules"])[0],
