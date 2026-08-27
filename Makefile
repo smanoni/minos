@@ -9,6 +9,7 @@ YOSYS     ?= yosys
 IVERILOG  ?= iverilog
 VVP       ?= vvp
 KLAYOUT   ?= klayout
+VERILATOR ?= verilator
 CURL      ?= curl -fsSL
 
 SCRIPTS   ?= scripts
@@ -138,6 +139,28 @@ puzzle: deps | $(WORKDIR)
 	$(MAKE) match DESIGN=puzzle
 	$(MAKE) lift DESIGN=puzzle
 	-$(MAKE) emit DESIGN=puzzle
+
+# JSC Puzzle
+$(GDSDIR)/puzzle.gds:
+	@$(MAKE) --no-print-directory gds
+
+$(WORKDIR)/puzzle.def: $(GDSDIR)/puzzle.gds $(SCRIPTS)/gds2def.py | $(WORKDIR)
+	$(PYTHON) $(SCRIPTS)/gds2def.py $< $(PDK_ROOT)/$(PDK) $@
+
+$(WORKDIR)/puzzle.v: $(WORKDIR)/puzzle.def $(SCRIPTS)/def2v.py
+	$(PYTHON) $(SCRIPTS)/def2v.py $< $@
+
+$(WORKDIR)/puzzle_generic.v: $(WORKDIR)/puzzle.v $(SCRIPTS)/generic.ys
+	$(MAKE) generic DESIGN=puzzle TOP=puzzle
+
+$(WORKDIR)/puzzle_key.txt: $(WORKDIR)/puzzle_generic.v $(SCRIPTS)/itersat.py
+	YOSYS="$(YOSYS)" $(PYTHON) $(SCRIPTS)/itersat.py $< puzzle $@
+
+.PHONY: jsc-puzzle
+jsc-puzzle: $(WORKDIR)/puzzle_key.txt $(SCRIPTS)/puzzle_tb.sv
+	$(VERILATOR) --binary --timing -Wno-fatal -Mdir $(TMPDIR)/puzzle_vl \
+		-o puzzle_sim --top tb $(SCRIPTS)/puzzle_tb.sv $(WORKDIR)/puzzle_generic.v
+	$(TMPDIR)/puzzle_vl/puzzle_sim +key=$(WORKDIR)/puzzle_key.txt
 
 .PHONY: generic
 generic: | $(TMPDIR)
