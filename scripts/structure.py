@@ -415,6 +415,67 @@ def bus_of(name):
     return (got.group(1), int(got.group(2))) if got else (name, 0)
 
 
+def net_names(module):
+    """The name a cut will give each bit, where the netlist carries several.
+
+    A layout read back names one net after the cell pin it arrives on and
+    again after the wire itself, and it is the wire's name a cut promotes to
+    a port. Told apart by the dot the pin name carries, and by length where
+    neither has one.
+    """
+    out = collections.defaultdict(list)
+    for name, spec in module.get("netnames", {}).items():
+        for index, bit in enumerate(spec["bits"]):
+            out[bit].append(name if len(spec["bits"]) == 1
+                            else "%s[%d]" % (name, index))
+    return {bit: min(names, key=lambda n: ("." in n, len(n), n))
+            for bit, names in out.items()}
+
+
+def load_cones(cells, driver, ports, groups, names):
+    """The logic a word of registers is loaded from, cut away from the word.
+
+    Almost no combinational logic in a real design drives a port directly: it
+    drives a register, and the register drives the port. Drawing cones only
+    at the outputs therefore finds twenty of them in the whole corpus and
+    none at all in des, sha-3 or db_MAC, so the pass that proves a cone is an
+    adder is never asked about the adders. Cut at the register's own input
+    instead and every word has a cone, which is the question worth asking of
+    it: not what the word is, which the register templates already prove, but
+    what it is loaded with.
+    """
+    out = []
+    for kind, index, group in groups:
+        bits, spelt = [], []
+        for flop in group:
+            data = cells[flop]["connections"].get("D")
+            if not data or data[0] not in names:
+                bits = []
+                break
+            bits.append(data[0])
+            spelt.append(names[data[0]])
+        if len(bits) < 2 or len(set(bits)) != len(bits):
+            continue
+        inside = cone_cells(cells, driver, ports, group)
+        if not inside:
+            continue
+        srcs, inputs = set(), set()
+        for cell in inside:
+            for port, conn in cells[cell]["connections"].items():
+                if cells[cell]["port_directions"].get(port) != "input":
+                    continue
+                for bit in conn:
+                    src = driver.get(bit)
+                    if src is None:
+                        inputs.add(ports.get(bit, str(bit)))
+                    elif is_flop(cells, src):
+                        srcs.add(src)
+        out.append({"kind": "cone", "output": "%s%d_d" % (kind, index),
+                    "outputs": spelt, "bits": spelt, "cells": inside,
+                    "registers": sorted(srcs), "inputs": sorted(inputs)})
+    return out
+
+
 def cones(cells, driver, ports):
     """Combinational logic behind each output bus.
 
@@ -452,6 +513,7 @@ def cones(cells, driver, ports):
 
 def main(path, out=None):
     cells, driver, sinks, ports = load(path)
+    names = net_names(list(json.load(open(path))["modules"].values())[0])
     flops, prev, found = chains(cells, driver, ports)
 
     print("%s" % path)
@@ -493,6 +555,16 @@ def main(path, out=None):
         regions.append({"kind": "state", "width": len(group),
                         "cells": group + cone_cells(cells, driver, ports, group),
                         "registers": group, "inputs": list(ctrl)})
+
+    print("  load cones:")
+    groups = [(r["kind"], i, r["registers"]) for i, r in enumerate(regions)
+              if r["kind"] in ("chain", "bank", "state")]
+    for region in load_cones(cells, driver, ports, groups, names):
+        print("    %-14s %2d wide, %d registers, %d ports, %d cells"
+              % (region["output"], len(region["bits"]),
+                 len(region["registers"]), len(region["inputs"]),
+                 len(region["cells"])))
+        regions.append(region)
 
     print("  output cones:")
     for name, (srcs, inputs, inside, bits) in sorted(
