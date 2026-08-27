@@ -1891,6 +1891,51 @@ def declare(lines, ports, rest=()):
     return ["  wire %s;" % n for n in sorted(used - known)]
 
 
+def hoist(lines, ports):
+    """Declarations for the nets a line reads above the line that declares them.
+
+    A net written where it is first computed reads better than one declared
+    far from the value it carries, so that is how a section comes out. The
+    sections are ordered by what the design does, though, not by what each
+    net needs, so a handful of uses land above their declaration, and a port
+    is defined a second time by the section that drives it. Verilog reads
+    such a use as a net of its own and then refuses the declaration below as
+    a second one. Those few are lifted to the block at the top: a definition
+    leaves its value behind as an assignment where it stood, and a bare
+    declaration moves whole, having nothing to leave.
+    """
+    define = re.compile(r"^(\s*)wire (\w+) = ")
+    bare = re.compile(r"^\s*(?:wire|reg|integer)\s+(?:\[[^\]]*\]\s*)?"
+                      r"(\w+)\s*(?:\[[^\]]*\]\s*)*;\s*$")
+    valued, plain = {}, {}
+    for index, line in enumerate(lines):
+        hit = define.match(line)
+        if hit:
+            valued.setdefault(hit.group(2), index)
+            continue
+        hit = bare.match(line)
+        if hit:
+            plain.setdefault(hit.group(1), index)
+    early = {name for name in valued if name in ports}
+    moved = set()
+    for index, line in enumerate(lines):
+        for name in set(re.findall(r"\b\w+\b", line)):
+            if index < valued.get(name, index):
+                early.add(name)
+            if index < plain.get(name, index):
+                moved.add(name)
+    for name in early:
+        lines[valued[name]] = define.sub(r"\1assign %s = " % name,
+                                         lines[valued[name]], 1)
+    out = ["  wire %s;" % name for name in sorted(early) if name not in ports]
+    out += ["  " + lines[plain[name]].strip()
+            for name in sorted(moved) if name not in ports]
+    for name in moved:
+        lines[plain[name]] = None
+    lines[:] = [line for line in lines if line is not None]
+    return out
+
+
 def instance(hit, reg, role):
     """A library module wired up in place of the body it proved equal to.
 
@@ -2141,7 +2186,8 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
     lines = [one for piece in proven for one in piece]
     rest, mods = leftover(netlist, regions, chains, states, banks, cones,
                           paths, selects, names, lines, proven, seat)
-    lines = head + declare(lines, ports, rest) + rest
+    forward = hoist(rest, ports)
+    lines = head + forward + declare(lines, ports, rest + forward) + rest
     tail = ["endmodule", ""]
     if mods:
         print("  %d sections stand as modules of their own" % len(mods))
