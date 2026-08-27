@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import match
 import expr
 import structure
+import buses
 
 
 CANONICAL = {"clk": "clk", "rst": "rst", "sr": "sr", "en": "en",
@@ -957,6 +958,15 @@ def output_bus(region, outs):
     drawn around, and that one is the result; the rest are working nets that a
     reader of the recovered RTL never sees.
     """
+    # A load cone's result is a set of internal nets, which the cut turns
+    # into a port apiece under the name the netlist gave them. The region
+    # wrote those names down in bit order, so the result is assembled from
+    # them rather than looked for among the ports the cut exposed.
+    want = region.get("outputs")
+    if want:
+        have = {port: bits for bits in outs.values() for port in bits}
+        got = [port for port in want if port in have]
+        return got if len(got) == len(want) else None
     if region.get("output") in outs:
         return outs[region["output"]]
     return list(outs.values())[0] if len(outs) == 1 else None
@@ -2105,8 +2115,23 @@ def register_names(module, ports, chains, states, banks):
     return names, roles
 
 
+def loaded_with(held, index):
+    """The form a bank's own load cone was proved to be, where one was.
+
+    A bank writes what it is given and nothing else, so a proof about what it
+    is given is a proof about the bank: where the cone driving its D inputs
+    was shown to be a sum, the register loads that sum. Only banks, since a
+    chain and a counter compute their own next state and a form proved of
+    their inputs would be claimed twice.
+    """
+    hit = held.get("bank%d_d" % index)
+    if not hit or "y" not in hit:
+        return None
+    return datapath_form(hit)
+
+
 def write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
-              names, roles, across, seat, out):
+              names, roles, across, seat, out, held=None):
     """Assembles the proven pieces into one readable module"""
     design = json.load(open(netlist))
     top = list(design["modules"])[0]
@@ -2164,7 +2189,7 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
     for index, info in sorted(banks.items()):
         reg = names[index]
         role = dict(roles[index])
-        role["d"] = "{%s}" % ", ".join(
+        role["d"] = loaded_with(held or {}, index) or "{%s}" % ", ".join(
             role["d%d" % i] for i in reversed(range(info["width"])))
         piece = state_decl(info["width"], reg)
         piece += load_body(info["width"], info["enable"], info["clear"],
@@ -2518,6 +2543,16 @@ def main(netlist, regions_path, outdir, out=None):
                   "%d chains %d deep" % (count, width)
                   for width, count, _, _ in sorted(across.values(), key=str))))
     regs = known_buses(netlist, regions, chains, states, banks, names)
+    # The register words tell the combinational nets what they are bits of,
+    # and a cone reads far more of the second than the first. Grown here
+    # rather than in the pass of their own so a cone is offered both at once.
+    module_, driver_ = buses.load(netlist)
+    start = dict(regs)
+    start.update(buses.seeds(module_, regions))
+    grown, _ = buses.propagate(module_, driver_, start)
+    have = {name for name, _ in regs}
+    regs = regs + [(name, bits) for name, bits in sorted(grown.items())
+                   if name.startswith("bus") and name not in have]
     print("cones")
     if regs:
         show = ["%s[%d:0]" % (n, len(b) - 1) for n, b in regs[:12]]
@@ -2528,6 +2563,18 @@ def main(netlist, regions_path, outdir, out=None):
     paths = lift_datapaths(netlist, regions, workdir, set(cones), regs)
     selects = lift_selects(netlist, regions, workdir,
                            set(cones) | set(paths), regs)
+    # What a word is loaded with is proved against the logic alone, and the
+    # register that word belongs to already writes its own next state under
+    # its own enable and reset. Writing the proof back as well would drive
+    # those nets twice, so it is reported and not yet emitted.
+    loads = {r["output"] for r in regions if r.get("outputs")}
+    held = {name: hit for name, hit in list(paths.items()) + list(selects.items())
+            if name in loads}
+    paths = {n: h for n, h in paths.items() if n not in loads}
+    selects = {n: h for n, h in selects.items() if n not in loads}
+    if held:
+        print("  %d loads proved but not written back: %s"
+              % (len(held), ", ".join(sorted(held))))
     roles.update(realign(module, module["ports"], chains, states, banks,
                          names, paths))
     print("  %d of %d cones lifted, %d of them as a case"
@@ -2535,7 +2582,7 @@ def main(netlist, regions_path, outdir, out=None):
              sum(1 for r in regions if r["kind"] == "cone"), len(selects)))
     if out:
         write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
-                  names, roles, across, seat, out)
+                  names, roles, across, seat, out, held)
         verdict = prove_candidate(open(out).read().replace(
             "module %s(" % list(json.load(open(netlist))["modules"])[0],
             "module cand("), netlist_as_gold(netlist, workdir), workdir, "rtl")
