@@ -457,7 +457,11 @@ def load_cones(cells, driver, ports, groups, names):
         if len(bits) < 2 or len(set(bits)) != len(bits):
             continue
         inside = cone_cells(cells, driver, ports, group)
-        if not inside:
+        # Every bit of the word has to be computed here, or the word is not
+        # this cone's result. open8 loads three of its banks straight from
+        # the register file's read bus with no logic between, so those bits
+        # cross the cut as inputs and no form could ever be proved of them.
+        if not inside or any(driver.get(bit) not in inside for bit in bits):
             continue
         srcs, inputs = set(), set()
         for cell in inside:

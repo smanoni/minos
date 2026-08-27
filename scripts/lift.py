@@ -2559,10 +2559,19 @@ def main(netlist, regions_path, outdir, out=None):
         print("  %d words to read a cone against: %s%s"
               % (len(regs), ", ".join(show),
                  ", ..." if len(regs) > len(show) else ""))
+    # A chain and a counter were proved against a template that already says
+    # what they load: a shift chain takes {serial in, q}, a counter takes
+    # q + step. Asking a cone the same question again answers it a second
+    # time at the price of proving it, and eighty seven of the corpus's
+    # hundred and eleven load cones were that. A bank is the exception and
+    # the reason the cones are drawn: its template says only q <= d, and what
+    # d is is exactly what is not yet known.
+    said = {"chain%d_d" % index for index in chains}
+    said |= {"state%d_d" % index for index in states}
     cones = lift_cones(netlist, regions, workdir)
-    paths = lift_datapaths(netlist, regions, workdir, set(cones), regs)
+    paths = lift_datapaths(netlist, regions, workdir, set(cones) | said, regs)
     selects = lift_selects(netlist, regions, workdir,
-                           set(cones) | set(paths), regs)
+                           set(cones) | set(paths) | said, regs)
     # What a word is loaded with is proved against the logic alone, and the
     # register that word belongs to already writes its own next state under
     # its own enable and reset. Writing the proof back as well would drive
