@@ -2131,7 +2131,7 @@ def loaded_with(held, index):
 
 
 def write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
-              names, roles, across, seat, out, held=None):
+              names, roles, across, seat, out, held=None, words=None):
     """Assembles the proven pieces into one readable module"""
     design = json.load(open(netlist))
     top = list(design["modules"])[0]
@@ -2210,7 +2210,7 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
     proven += [[one] for one in output_wiring(ports, chains, names, seat)]
     lines = [one for piece in proven for one in piece]
     rest, mods = leftover(netlist, regions, chains, states, banks, cones,
-                          paths, selects, names, lines, proven, seat)
+                          paths, selects, names, lines, proven, seat, words)
     forward = hoist(rest, ports)
     lines = head + forward + declare(lines, ports, rest + forward) + rest
     tail = ["endmodule", ""]
@@ -2478,8 +2478,49 @@ def naming(module, regions, chains, states, banks, cones, paths, selects,
     return skip, alias, label
 
 
+def word_labels(module, skip, label, alias, words, lines=()):
+    """Names every bit of a recovered word after the word, and says how wide.
+
+    A bit already spoken for keeps the name it has and the rest of the word is
+    still a word: demanding every bit be free loses almost all of them, since
+    any design of size has a proven region touching most words somewhere. Only
+    a net a gate drives can be renamed — one off a register is that register,
+    and one out of a replaced region belongs to the template speaking for it.
+    """
+    cells = module["cells"]
+    drive = driver_map(module)
+    # Only a net that more than one line reads. A net read once is folded into
+    # the line that reads it and costs nothing; naming it keeps it as a wire
+    # of its own and buys a word at the price of a line, which present paid
+    # 578 to 715 times over before this was seen.
+    reads = collections.Counter(
+        bit for cell in cells.values()
+        for port, bits in cell["connections"].items()
+        for bit in bits
+        if cell["port_directions"].get(port) == "input")
+    # A net a proven piece already wrote down keeps that spelling. The pieces
+    # are emitted before this runs and are not revisited, so renaming one now
+    # leaves a template reading a wire nothing declares.
+    spoken = set(re.findall(r"\b\w+\b", "\n".join(lines)))
+    out = {}
+    for name in sorted(words or {}):
+        back = [bit for bit in words[name]
+                if isinstance(bit, int) and bit not in label
+                and bit not in alias and bit in drive
+                and reads[bit] > 1
+                and expr.net_name(bit) not in spoken
+                and drive[bit] not in skip
+                and match.FLOP not in cells[drive[bit]]["type"]]
+        if len(back) < 2:
+            continue
+        out[expr.plainly(name)] = len(back)
+        for slot, bit in enumerate(back):
+            label[bit] = "%s[%d]" % (expr.plainly(name), slot)
+    return out
+
+
 def leftover(netlist, regions, chains, states, banks, cones, paths, selects,
-             names, lines, proven=(), seat=()):
+             names, lines, proven=(), seat=(), words=None):
     """Everything no template claimed, written out as plain expressions.
 
     A module is only worth proving as a whole once every output is driven, so
@@ -2491,7 +2532,13 @@ def leftover(netlist, regions, chains, states, banks, cones, paths, selects,
     ports = module["ports"]
     skip, alias, label = naming(module, regions, chains, states, banks,
                                 cones, paths, selects, names, seat)
-    wires, body, taken, mods = expr.transcribe(netlist, skip, alias, label, proven)
+    # Settled here rather than inside the transcription, which is not the only
+    # thing that names a net: a register's role and an output's wiring name
+    # them too, and a word named in one place and not the others leaves a
+    # concatenation reading a wire nothing declares.
+    wide = word_labels(module, skip, label, alias, words, lines)
+    wires, body, taken, mods = expr.transcribe(netlist, skip, alias, label,
+                                               proven, recovered=wide)
     if not body:
         return [], []
     driven = driven_names(lines)
@@ -2556,8 +2603,20 @@ def main(netlist, regions_path, outdir, out=None):
     start.update(buses.adders(netlist, workdir))
     grown, _ = buses.propagate(module_, driver_, start)
     have = {name for name, _ in regs}
-    regs = regs + [(name, bits) for name, bits in sorted(grown.items())
-                   if name.startswith("bus") and name not in have]
+    # Only the words this pass made, and only where they are its own: a bit
+    # a seed word already holds belongs to the port or register it came
+    # from, and naming it twice is what a word must never do.
+    seeded = {bit for name, bits in grown.items()
+              if not name.startswith(("bus", "add")) for bit in bits}
+    made = {}
+    for name, bits in grown.items():
+        if not name.startswith(("bus", "add")):
+            continue
+        keep = [bit for bit in bits if bit not in seeded]
+        if len(keep) > 1:
+            made[name] = keep
+    regs = regs + [(name, bits) for name, bits in sorted(made.items())
+                   if name not in have]
     print("cones")
     if regs:
         show = ["%s[%d:0]" % (n, len(b) - 1) for n, b in regs[:12]]
@@ -2604,7 +2663,7 @@ def main(netlist, regions_path, outdir, out=None):
              sum(1 for r in regions if r["kind"] == "cone"), len(selects)))
     if out:
         write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
-                  names, roles, across, seat, out, held)
+                  names, roles, across, seat, out, held, made)
         gold = netlist_as_gold(netlist, workdir)
         verdict = prove_candidate(open(out).read().replace(
             "module %s(" % list(json.load(open(netlist))["modules"])[0],

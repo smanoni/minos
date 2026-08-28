@@ -1168,7 +1168,8 @@ def arrange(defs, blocks, proven=(), keep=()):
     return out
 
 
-def transcribe(path, skip, alias, label=None, proven=(), record=None):
+def transcribe(path, skip, alias, label=None, proven=(), record=None,
+               recovered=None):
     """Wires, assignments and always blocks for every cell not skipped.
 
     A net that more than one gate reads becomes a wire of its own, so the
@@ -1441,6 +1442,13 @@ def transcribe(path, skip, alias, label=None, proven=(), record=None):
             buses["%s_%s" % (base, role)] = len(members)
             for slot2, b in enumerate(back):
                 label[b] = "%s_%s[%d]" % (base, role, slot2)
+    # Words recovered from the netlist itself rather than off a register's
+    # next state. The naming was settled by the caller, which needed it too;
+    # what is left here is to declare each one as the word it is, so its bits
+    # are assigned into it rather than each standing as a wire of its own.
+    for name, wide in sorted((recovered or {}).items()):
+        buses[name] = wide
+
     for name, wide in buses.items():
         wires.append("  wire [%d:0] %s;" % (wide - 1, name))
 
