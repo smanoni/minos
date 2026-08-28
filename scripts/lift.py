@@ -2606,11 +2606,17 @@ def main(netlist, regions_path, outdir, out=None):
             "module cand("), netlist_as_gold(netlist, workdir), workdir, "rtl")
         print("rtl -> %s" % out)
         print("  whole module vs recovered netlist: %s" % verdict)
-        # Giving up is not a disproof. A module too large to prove in the time
-        # allowed still has to be compiled and simulated, and that simulation
-        # is the only evidence it has left, so only an answer counts against
-        # it: the puzzle proves nothing whole and was being denied the run.
-        return 1 if verdict.startswith(("NOT EQUIVALENT", "no miter")) else 0
+        # Giving up is not a disproof, and it is not a pass either. Running a
+        # design for two thousand cycles and seeing it agree says nothing
+        # about the cycle after: db_MAC and kwr_lfsr once agreed for every one
+        # of them and were disproved outright the moment they were asked. So
+        # a module that does not prove is reported unverified rather than
+        # counted, and only an answer fails the run.
+        if verdict.startswith(("NOT EQUIVALENT", "no miter")):
+            return 1
+        if not verdict.startswith("PROVEN"):
+            print("  unverified: no proof, and a simulation would not be one")
+        return 0
 
 
 def netlist_as_gold(netlist, workdir):
