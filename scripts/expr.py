@@ -85,6 +85,9 @@ MEMORY = 4
 # splits a name at its first bracket to find out.
 ENTRY = re.compile(r"^(\w+)\[(\d+)\](\[\d+\])$")
 
+# Rebuilt whenever a netlist is read, since what a numbered net is spelt with
+# is chosen from that netlist. Anchored on the whole name so a recovered word
+# like word0 is not read as net number zero.
 NUMBERED = re.compile(r"^n(\d+)$")
 INDEXED = re.compile(r"^(\w+(?:\[\d+\])?)\[(\d+)\]$")
 
@@ -433,6 +436,9 @@ def apart(families, cells, driver, ports):
 
 def load(path):
     module = list(json.load(open(path))["modules"].values())[0]
+    global NUMBERED
+    NUMBER[0] = numbering(module)
+    NUMBERED = re.compile(r"^%s(\d+)$" % NUMBER[0])
     cells = module["cells"]
     driver, fanout = {}, collections.Counter()
     for name, cell in cells.items():
@@ -445,8 +451,30 @@ def load(path):
     return module, cells, driver, fanout
 
 
+# How a net with no name of its own is spelt. Set from the netlist being
+# read, because the spelling has to be one the netlist does not use itself:
+# a design calling a net n37 and a recovered register also called n37 are two
+# different nets under one name, and an equivalence check that matches by
+# name then pairs them and reports the design unproven for a reason that is
+# not in the design.
+NUMBER = ["n"]
+
+
+def numbering(module):
+    """A spelling for a numbered net that this netlist does not already use"""
+    taken = set()
+    for name in module.get("netnames", {}):
+        got = re.match(r"^([A-Za-z_]+)\d", name)
+        if got:
+            taken.add(got.group(1))
+    for one in ("n", "w", "sig", "minos_n"):
+        if one not in taken:
+            return one
+    return "minos_n"
+
+
 def net_name(bit):
-    return "n%s" % bit
+    return "%s%s" % (NUMBER[0], bit)
 
 
 BASE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
