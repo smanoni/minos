@@ -2517,6 +2517,10 @@ def main(netlist, regions_path, outdir, out=None):
     workdir = os.path.join(outdir, "tmp")
     os.makedirs(workdir, exist_ok=True)
     regions = json.load(open(regions_path))
+    # Settled before anything names a net, since a name made under one
+    # spelling and read back under another is two names for one net.
+    expr.NUMBER[0] = expr.numbering(
+        list(json.load(open(netlist))["modules"].values())[0])
     print("chains")
     chains = lift_chains(netlist, regions, workdir)
     print("  %d of %d chains lifted"
@@ -2601,9 +2605,10 @@ def main(netlist, regions_path, outdir, out=None):
     if out:
         write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
                   names, roles, across, seat, out, held)
+        gold = netlist_as_gold(netlist, workdir)
         verdict = prove_candidate(open(out).read().replace(
             "module %s(" % list(json.load(open(netlist))["modules"])[0],
-            "module cand("), netlist_as_gold(netlist, workdir), workdir, "rtl")
+            "module cand("), gold, workdir, "rtl")
         print("rtl -> %s" % out)
         print("  whole module vs recovered netlist: %s" % verdict)
         # Giving up is not a disproof, and it is not a pass either. Running a
@@ -2615,7 +2620,15 @@ def main(netlist, regions_path, outdir, out=None):
         if verdict.startswith(("NOT EQUIVALENT", "no miter")):
             return 1
         if not verdict.startswith("PROVEN"):
-            print("  unverified: no proof, and a simulation would not be one")
+            # Induction did not converge, which is not an answer. Ask the
+            # smaller question it will answer rather than record nothing.
+            bounded = match.to_depth(gold, "%s/rtl.json" % workdir,
+                                     workdir, "rtl")
+            if bounded and bounded.startswith("NOT"):
+                print("  whole module: %s" % bounded)
+                return 1
+            print("  whole module: %s"
+                  % (bounded or "unverified, and a simulation would not be one"))
         return 0
 
 
