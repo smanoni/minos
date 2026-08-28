@@ -2196,13 +2196,13 @@ def write_rtl(netlist, regions, chains, states, banks, cones, paths, selects,
                            reg, role, info["edges"], True)
         proven.append(piece)
     for output, info in sorted(cones.items()):
-        expr = info["form"].replace("y", output, 1) % (info["width"] + 1,
+        form = info["form"].replace("y", output, 1) % (info["width"] + 1,
                                                        info["constant"])
         for slot, letter in enumerate("ab"):
-            expr = re.sub(r"\b%s\b" % letter,
+            form = re.sub(r"\b%s\b" % letter,
                           "%s_q" % names[slot] if slot in names else letter,
-                          expr)
-        proven.append(["  " + expr])
+                          form)
+        proven.append(["  " + form])
     for output, info in sorted(paths.items()):
         proven.append(["  " + datapath_line(info)])
     for output, info in sorted(selects.items()):
