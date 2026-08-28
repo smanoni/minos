@@ -9,12 +9,15 @@
 import collections
 import json
 import os
+import subprocess
 import sys
 
 # How many bits a proposed word needs before it is taken for one. Two nets
 # driven alike is the ordinary coincidence of a gate basis and says nothing;
 # a design of two bit words would be seated almost entirely by chance.
 FLOOR = int(os.environ.get("MINOS_WORD", "4"))
+
+YOSYS = os.environ.get("YOSYS", "").split()
 
 ROUNDS = 12
 
@@ -33,6 +36,110 @@ def load(path):
                 for bit in bits:
                     driver[bit] = name
     return module, driver
+
+
+def named(module):
+    """The plainest name each bit carries, a cut's name for it winning"""
+    out = collections.defaultdict(list)
+    for name, spec in module.get("netnames", {}).items():
+        for index, bit in enumerate(spec["bits"]):
+            out[bit].append(name if len(spec["bits"]) == 1
+                            else "%s[%d]" % (name, index))
+    return {bit: min(names, key=lambda n: ("." in n, len(n), n))
+            for bit, names in out.items()}
+
+
+def adders(netlist, workdir):
+    """The words an adder's carry chain spells out, in the order it spells them.
+
+    A rule keyed on what a net is built from cuts a bus in half, because
+    synthesis pushes an inverter wherever it is locally cheaper and the bits
+    of one word stop looking alike. A carry chain does not have that problem:
+    it is a chain because each stage hands the next its carry, and that hand
+    is the bit order itself, least significant first. Nothing about it depends
+    on how the stage was mapped.
+
+    Read off a copy of the design with adders extracted, and carried back to
+    the design itself by net name, since the extraction renumbers the bits but
+    keeps what they are called.
+    """
+    if not YOSYS:
+        return {}
+    out = "%s/fa.json" % workdir
+    run = subprocess.run(
+        YOSYS + ["-qp", "read_json %s; simplemap; extract_fa; write_json %s"
+                 % (netlist, out)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    if run.returncode or not os.path.exists(out):
+        return {}
+    module = list(json.load(open(out))["modules"].values())[0]
+    home = named(module)
+    # Extraction renumbers the bits and keeps what they are called, so the
+    # chain is read there and carried back here by name.
+    seats = {name: bit for bit, name
+             in named(list(json.load(open(netlist))["modules"].values())[0]).items()}
+    cells = {name: cell for name, cell in module["cells"].items()
+             if cell["type"] == "$fa"}
+
+    # The carry does not always arrive on the carry pin, and does not always
+    # arrive uninverted: the three inputs of a full adder are symmetric, so a
+    # mapper is free to put the carry on any of them, and ABC builds adders
+    # with inverted carries. Followed the strict way the chains come out three
+    # wide; followed this way open8's runs to fourteen.
+    skip = {name: cell["connections"]["A"][0]
+            for name, cell in module["cells"].items()
+            if cell["type"] == "$_NOT_"}
+    takes = collections.defaultdict(list)
+    for name, cell in cells.items():
+        for port in ("A", "B", "C"):
+            takes[cell["connections"][port][0]].append((name, port))
+    after = {}
+    for name, cell in cells.items():
+        out_bit = cell["connections"]["X"][0]
+        reach = list(takes.get(out_bit, []))
+        for gate, source in skip.items():
+            if source == out_bit:
+                reach += takes.get(
+                    module["cells"][gate]["connections"]["Y"][0], [])
+        reach = [one for one in reach if one[0] != name]
+        if len(reach) == 1:
+            after[name] = reach[0]
+
+    words, taken = {}, set()
+    heads = [name for name in cells
+             if name not in {one for one, _ in after.values()}]
+    for head in sorted(heads):
+        chain, carry, step = [], [], head
+        while step and step not in taken:
+            taken.add(step)
+            chain.append(step)
+            got = after.get(step)
+            if not got:
+                break
+            step, port = got
+            carry.append(port)
+        if len(chain) < FLOOR:
+            continue
+        # Y is the sum whichever input carried, since A ^ B ^ C does not care
+        # which is which. The two operands do, so they are only claimed where
+        # every stage agrees on which pin each of them came in on.
+        rest = [[p for p in "ABC" if p != one] for one in carry] or None
+        spans = [("sum", ["Y"] * len(chain))]
+        if rest and len({tuple(one) for one in rest}) == 1:
+            first, second = rest[0]
+            spans += [("one", [first] * len(chain)),
+                      ("two", [second] * len(chain))]
+        for role, ports in spans:
+            bits = [cells[one]["connections"][port][0]
+                    for one, port in zip(chain, ports)]
+            spelt = [home.get(bit) for bit in bits]
+            if any(one is None for one in spelt) or len(set(spelt)) != len(spelt):
+                continue
+            back = [seats.get(one) for one in spelt]
+            if any(one is None for one in back) or len(set(back)) != len(back):
+                continue
+            words["add%d_%s" % (len(words), role)] = back
+    return words
 
 
 def seeds(module, regions):

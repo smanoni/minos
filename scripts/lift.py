@@ -2549,6 +2549,7 @@ def main(netlist, regions_path, outdir, out=None):
     module_, driver_ = buses.load(netlist)
     start = dict(regs)
     start.update(buses.seeds(module_, regions))
+    start.update(buses.adders(netlist, workdir))
     grown, _ = buses.propagate(module_, driver_, start)
     have = {name for name, _ in regs}
     regs = regs + [(name, bits) for name, bits in sorted(grown.items())
@@ -2576,14 +2577,22 @@ def main(netlist, regions_path, outdir, out=None):
     # register that word belongs to already writes its own next state under
     # its own enable and reset. Writing the proof back as well would drive
     # those nets twice, so it is reported and not yet emitted.
+    # A load proved as a form is written back: nothing else drives those nets,
+    # since the register it feeds did not lift and a proved region's cells are
+    # dropped from the transcription. A load proved as a *case* is not, for
+    # the reason a case cannot be emitted anywhere: it settles with `=`, so
+    # `split()` reads the block as defining no register, swallows the drivers
+    # of the nets its arms read and exports none of them. warmup survives it
+    # only by being too small to section; the counter does not.
     loads = {r["output"] for r in regions if r.get("outputs")}
-    held = {name: hit for name, hit in list(paths.items()) + list(selects.items())
-            if name in loads}
-    paths = {n: h for n, h in paths.items() if n not in loads}
+    held = {name: hit for name, hit in selects.items() if name in loads}
     selects = {n: h for n, h in selects.items() if n not in loads}
     if held:
-        print("  %d loads proved but not written back: %s"
+        print("  %d loads proved as a case and not written back: %s"
               % (len(held), ", ".join(sorted(held))))
+    got = sorted(set(paths) & loads)
+    if got:
+        print("  %d loads written back: %s" % (len(got), ", ".join(got)))
     roles.update(realign(module, module["ports"], chains, states, banks,
                          names, paths))
     print("  %d of %d cones lifted, %d of them as a case"
