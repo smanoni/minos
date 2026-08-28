@@ -531,6 +531,52 @@ def canonicalise(path, module, conn, width, as_name, workdir, dwidth=0,
     return code == 0
 
 
+# How many cycles from reset a bounded proof covers where an unbounded one
+# will not converge. Not a proof for all time and never reported as one, but
+# it is a proof, and the alternative on those designs is no evidence at all.
+DEPTH = int(os.environ.get("MINOS_DEPTH", "40"))
+
+# The whole module is one question where a region is one of hundreds, so it is
+# worth more time than each of them. Sharing the region budget had anas_7193
+# reporting no evidence for a bound it in fact clears.
+WHOLE = int(os.environ.get("MINOS_WHOLE", str(max(TIMEOUT, 600))))
+
+
+def miter(a, b, over):
+    return ["read_json %s" % a, "read_json %s" % b,
+            "miter -equiv -flatten -make_assert gold gate miter",
+            "prep -top miter",
+            "async2sync",
+            "sat -verify -prove-asserts %s -set-init-zero miter" % over]
+
+
+def to_depth(a, b, workdir, tag, depth=None):
+    """Equivalent for this many cycles from reset, where all time will not go.
+
+    Temporal induction does not converge on a design that keeps a long running
+    state: an eight bit LFSR clears a hundred and eighty base cases without
+    closing one induction step, and more time only buys more base cases. A
+    bounded run answers instead of hanging, and an answer that covers forty
+    cycles is worth more than a timeout that covers none.
+    """
+    over = depth or DEPTH
+    # Halved until it answers rather than given up on. Forty cycles covers
+    # five of the seven designs induction will not settle; the other two, a
+    # cipher and an encoder, answer at twenty and would otherwise report
+    # nothing at all.
+    while over >= 5:
+        code, out = yosys(miter(a, b, "-seq %d" % over),
+                          "%s/%s_depth.ys" % (workdir, tag), WHOLE)
+        if out != "TIMEOUT":
+            if code == 0 and "SUCCESS!" in out and "FAIL!" not in out:
+                return "PROVEN EQUIVALENT for %d cycles from reset" % over
+            if "proof did fail" in out or "FAIL!" in out:
+                return "NOT EQUIVALENT"
+            return None
+        over //= 2
+    return None
+
+
 def prove(a, b, workdir, tag):
     """Proves two canonicalised modules equivalent over all time"""
     lines = ["read_json %s" % a, "read_json %s" % b,
