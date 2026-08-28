@@ -1,0 +1,29 @@
+# Copyright 2026 Simone Manoni.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Simone Manoni <simone.manoni2@gmail.com>
+
+read_json IN_NETLIST
+prep -top TOP -flatten
+async2sync
+design -stash gold
+
+read_verilog -sv IN_RTL
+prep -top TOP -flatten
+async2sync
+design -stash gate
+
+# Register against register rather than over the whole state space. A miter
+# asked to hold for all time never converges on a design that keeps a long
+# running state: an eight bit LFSR clears a hundred and eighty base cases
+# without ever closing one induction step, and no amount of time changes it.
+# Matched by name, which is why a recovered net must never be spelt the way
+# the netlist spells its own.
+design -copy-from gold -as TOP TOP
+design -copy-from gate -as gate TOP
+equiv_make TOP gate equiv
+prep -top equiv
+equiv_simple -seq 20
+equiv_induct -seq 20
+equiv_status

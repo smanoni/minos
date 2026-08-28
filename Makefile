@@ -207,6 +207,17 @@ lec:
 	$(YOSYS) -q -s $(TMPDIR)/$(DESIGN)_lec.ys \
 		&& echo "  $(DESIGN): extracted and generic netlists are equivalent"
 
+.PHONY: lec-rtl
+lec-rtl:
+	@top=`sed -n 's/^module \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' \
+		$(WORKDIR)/$(DESIGN)_lifted.sv | head -1`; \
+	sed -e 's|IN_NETLIST|$(WORKDIR)/$(DESIGN)_generic.json|' \
+	    -e 's|IN_RTL|$(WORKDIR)/$(DESIGN)_lifted.sv|' \
+	    -e "s|TOP|$$top|g" \
+	    $(SCRIPTS)/lec_rtl.ys > $(TMPDIR)/$(DESIGN)_lec_rtl.ys; \
+	$(YOSYS) -s $(TMPDIR)/$(DESIGN)_lec_rtl.ys 2>&1 \
+		| sed -n 's/^  Of those cells/  $(DESIGN): registers/p'
+
 .PHONY: structure
 structure:
 	$(PYTHON) $(SCRIPTS)/structure.py \
