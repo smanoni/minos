@@ -1,0 +1,36 @@
+# Copyright 2026 Simone Manoni.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Simone Manoni <simone.manoni2@gmail.com>
+
+READ_CELLS
+read_verilog IN_V
+hierarchy -top TOP -purge_lib
+proc
+flatten
+techmap
+opt_clean
+rename TOP gold
+design -stash gold
+
+read_verilog -sv IN_LIFTED
+hierarchy -top TOP
+proc
+flatten
+opt_clean
+rename TOP gate
+design -stash gate
+
+design -copy-from gold -as gold gold
+design -copy-from gate -as gate gate
+# A miter and not equiv_make. Equivalence matched by name needs the two sides
+# to call a register the same thing, and the whole point of the lift is that
+# they do not: it names a word after what it was proved to be. Matched that
+# way the lifted side stalls at nine registers proved of seventeen whatever
+# the induction depth. A miter asks only that the outputs agree, which is the
+# claim actually being made.
+miter -equiv -flatten -make_assert gold gate miter
+prep -top miter
+async2sync
+sat -verify -prove-asserts -tempinduct -set-init-zero miter

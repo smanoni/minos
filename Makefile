@@ -63,6 +63,7 @@ SIMFLAGS  := -g2012 -DFUNCTIONAL -DUNIT_DELAY=\#1
 # What tells the synthesiser what the cells in a netlist do. A layout is read
 # against the PDK's Liberty; a netlist that arrives in some other technology
 # brings its own, and `make netlist` overrides this with Verilog models.
+MINOS_TIMEOUT ?= 120
 READ_CELLS ?= read_liberty -ignore_miss_func -ignore_miss_dir $(LIBERTY)
 
 # Reference modules to recognise in a recovered netlist, as module:param=value
@@ -217,6 +218,24 @@ lec-rtl:
 	    $(SCRIPTS)/lec_rtl.ys > $(TMPDIR)/$(DESIGN)_lec_rtl.ys; \
 	$(YOSYS) -s $(TMPDIR)/$(DESIGN)_lec_rtl.ys 2>&1 \
 		| sed -n 's/^  Of those cells/  $(DESIGN): registers/p'
+
+.PHONY: lec-lifted
+lec-lifted:
+	@top=`sed -n 's/^module \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' \
+		$(WORKDIR)/$(DESIGN)_lifted.sv | head -1`; \
+	cells=$(WORKDIR)/$(DESIGN)_cells.v; \
+	if [ -f "$$cells" ]; then read="read_verilog $$cells"; \
+	else read="$(READ_CELLS)"; fi; \
+	sed -e "s|READ_CELLS|$$read|" \
+	    -e 's|IN_V|$(WORKDIR)/$(DESIGN).v|' \
+	    -e 's|IN_LIFTED|$(WORKDIR)/$(DESIGN)_lifted.sv|' \
+	    -e "s|TOP|$$top|g" \
+	    $(SCRIPTS)/lec_lifted.ys > $(TMPDIR)/$(DESIGN)_lec_lifted.ys; \
+	timeout $(MINOS_TIMEOUT) $(YOSYS) -q -s $(TMPDIR)/$(DESIGN)_lec_lifted.ys \
+		&& echo "  $(DESIGN): recovered RTL and extracted netlist are equivalent" \
+		|| { code=$$?; [ $$code = 124 ] \
+		     && echo "  $(DESIGN): no answer in $(MINOS_TIMEOUT)s, which is not a pass" \
+		     || { echo "  $(DESIGN): NOT EQUIVALENT"; exit 1; }; }
 
 .PHONY: structure
 structure:
