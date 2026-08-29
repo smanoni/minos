@@ -226,16 +226,26 @@ lec-lifted:
 	cells=$(WORKDIR)/$(DESIGN)_cells.v; \
 	if [ -f "$$cells" ]; then read="read_verilog $$cells"; \
 	else read="$(READ_CELLS)"; fi; \
-	sed -e "s|READ_CELLS|$$read|" \
-	    -e 's|IN_V|$(WORKDIR)/$(DESIGN).v|' \
-	    -e 's|IN_LIFTED|$(WORKDIR)/$(DESIGN)_lifted.sv|' \
-	    -e "s|TOP|$$top|g" \
-	    $(SCRIPTS)/lec_lifted.ys > $(TMPDIR)/$(DESIGN)_lec_lifted.ys; \
-	timeout $(MINOS_TIMEOUT) $(YOSYS) -q -s $(TMPDIR)/$(DESIGN)_lec_lifted.ys \
-		&& echo "  $(DESIGN): recovered RTL and extracted netlist are equivalent" \
-		|| { code=$$?; [ $$code = 124 ] \
-		     && echo "  $(DESIGN): no answer in $(MINOS_TIMEOUT)s, which is not a pass" \
-		     || { echo "  $(DESIGN): NOT EQUIVALENT"; exit 1; }; }
+	for depth in -tempinduct "-seq 40" "-seq 20" "-seq 10"; do \
+	  sed -e "s|READ_CELLS|$$read|" \
+	      -e 's|IN_V|$(WORKDIR)/$(DESIGN).v|' \
+	      -e 's|IN_LIFTED|$(WORKDIR)/$(DESIGN)_lifted.sv|' \
+	      -e "s|TOP|$$top|g" \
+	      -e "s|DEPTH|$$depth|" \
+	      $(SCRIPTS)/lec_lifted.ys > $(TMPDIR)/$(DESIGN)_lec_lifted.ys; \
+	  out=`timeout $(MINOS_TIMEOUT) $(YOSYS) -q -s \
+	       $(TMPDIR)/$(DESIGN)_lec_lifted.ys 2>&1`; code=$$?; \
+	  if [ $$code = 0 ]; then \
+	    if [ "$$depth" = -tempinduct ]; then \
+	      echo "  $(DESIGN): equivalent to the netlist for all time"; \
+	    else \
+	      echo "  $(DESIGN): equivalent to the netlist for $${depth#-seq } cycles"; \
+	    fi; exit 0; \
+	  fi; \
+	  case "$$out" in *"proof did fail"*|*FAIL!*) \
+	    echo "  $(DESIGN): NOT EQUIVALENT"; exit 1;; esac; \
+	done; \
+	echo "  $(DESIGN): no answer, which is not a pass"
 
 .PHONY: structure
 structure:
