@@ -1745,6 +1745,14 @@ def lift_selects(netlist, regions, workdir, done, regs=()):
         for bit, one in seat.items():
             if bit in spelling:
                 speak.setdefault(one, spelling[bit])
+        # A net no word claims is still written down: the transcription calls
+        # an internal net after the bit it is, and that name is as real as any
+        # other. Refusing it cost hd_8b10b both its encoder tables, which are
+        # a lookup and have no regularity for a word to be recovered from —
+        # ten per cent of its nets are seated, the corpus's lowest. Offered
+        # last, so a word's name always wins where there is one.
+        for bit, one in seat.items():
+            speak.setdefault(one, expr.net_name(bit))
         wanted = set(control) | {net for one in arms for net, _ in one
                                  if net not in ("0", "1")}
         if any(taken[seats[net]] not in speak for net in wanted):

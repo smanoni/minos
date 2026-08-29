@@ -1216,6 +1216,16 @@ def transcribe(path, skip, alias, label=None, proven=(), record=None,
         if cell["connections"]["C"][0] not in outside:
             pinned |= set(cell["connections"]["D"])
 
+    # A net a proven piece spells out has to stay a net. The pieces are
+    # written before this runs and are never revisited, so one folded into
+    # the line that reads it leaves the piece naming something declared
+    # nowhere. They name a net after the bit it is, which is what makes the
+    # name readable back.
+    for piece in proven:
+        for line in piece:
+            for one in re.findall(r"\bn(\d+)\b", line):
+                pinned.add(int(one))
+
     def folds(bit):
         """The gate to write in place of a net, where it is right to fold one"""
         src = driver.get(bit)
