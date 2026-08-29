@@ -247,6 +247,12 @@ lec-lifted:
 	done; \
 	echo "  $(DESIGN): no answer, which is not a pass"
 
+.PHONY: score
+score:
+	@$(PYTHON) $(SCRIPTS)/score.py $(WORKDIR)/$(DESIGN).v \
+		$(WORKDIR)/$(DESIGN)_generic.json \
+		$(WORKDIR)/$(DESIGN)_lifted_words.json
+
 .PHONY: structure
 structure:
 	$(PYTHON) $(SCRIPTS)/structure.py \

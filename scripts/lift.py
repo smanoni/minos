@@ -2625,6 +2625,23 @@ def main(netlist, regions_path, outdir, out=None):
             made[name] = keep
     regs = regs + [(name, bits) for name, bits in sorted(made.items())
                    if name not in have]
+    # The grouping this run recovered, written down so it can be scored.
+    # It exists nowhere else: the words are built here out of what several
+    # passes proved and are spent immediately on the text, so a reader of the
+    # output can see them and a scorer cannot.
+    if out:
+        seen = {}
+        for word, bits in regs:
+            for index, bit in enumerate(bits):
+                seen[bit] = "%s[%d]" % (word, index)
+        holds = {}
+        for name, cell in module["cells"].items():
+            if match.FLOP not in cell["type"]:
+                continue
+            where = seen.get(cell["connections"]["Q"][0])
+            if where:
+                holds[name] = where
+        json.dump(holds, open(out.replace(".sv", "_words.json"), "w"), indent=1)
     print("cones")
     if regs:
         show = ["%s[%d:0]" % (n, len(b) - 1) for n, b in regs[:12]]
