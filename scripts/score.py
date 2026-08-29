@@ -19,8 +19,13 @@ import sys
 
 # How a synthesised netlist spells a register bit: the name its author gave
 # the word, `_reg` where the tool marked it one, and the bit's own index with
-# the brackets turned into underscores.
-BIT = re.compile(r"^(.*?)_reg(?:_reg)?_(\d+)_$")
+# the brackets turned into underscores. A register one bit wide has no index
+# at all, which is not a name that failed to parse but a word of one — a
+# third of open8's flops are those, and demanding an index scored it over
+# two thirds of itself.
+# A register file carries two of those, an entry and a bit — `Regfile_reg_2__2_`
+# — and the word it belongs to is the file, which is how M16 declares it.
+BIT = re.compile(r"^(.*?)_reg(?:_reg)?((?:_\d+_)*)$")
 INSTANCE = re.compile(r"^\s*(\S+)\s+(\S+)\s*\(", re.M)
 FLOP = "DFF"
 
@@ -36,7 +41,7 @@ def author(netlist):
     out = {}
     for kind, name in INSTANCE.findall(open(netlist).read()):
         got = BIT.match(name)
-        if got:
+        if got and got.group(1):
             out[name] = got.group(1)
     return out
 

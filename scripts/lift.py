@@ -1335,7 +1335,7 @@ def driven_names(lines):
 SLOT = re.compile(r"^(\w+)\[(\d+)\]$")
 
 
-def known_buses(netlist, regions, chains, states, banks, names):
+def known_buses(netlist, regions, chains, states, banks, names, record=None):
     """Every word of registers the recovered RTL will have, as bits in order.
 
     A cone reads registers, and until the registers have been put back into
@@ -1350,7 +1350,7 @@ def known_buses(netlist, regions, chains, states, banks, names):
     module = list(json.load(open(netlist))["modules"].values())[0]
     skip, alias, label = naming(module, regions, chains, states, banks,
                                 {}, {}, {}, names)
-    record = {}
+    record = {} if record is None else record
     expr.transcribe(netlist, skip, alias, label, record=record)
     slots = collections.defaultdict(dict)
     for bit, name in record.items():
@@ -2601,7 +2601,8 @@ def main(netlist, regions_path, outdir, out=None):
               % (len(across), ", ".join(
                   "%d chains %d deep" % (count, width)
                   for width, count, _, _ in sorted(across.values(), key=str))))
-    regs = known_buses(netlist, regions, chains, states, banks, names)
+    spoken = {}
+    regs = known_buses(netlist, regions, chains, states, banks, names, spoken)
     # The register words tell the combinational nets what they are bits of,
     # and a cone reads far more of the second than the first. Grown here
     # rather than in the pass of their own so a cone is offered both at once.
@@ -2630,7 +2631,11 @@ def main(netlist, regions_path, outdir, out=None):
     # passes proved and are spent immediately on the text, so a reader of the
     # output can see them and a scorer cannot.
     if out:
-        seen = {}
+        # Every bit the transcription named, not only the ones that became a
+        # bus: an array is named `mem0[3][2]` and belongs to no bus at all, so
+        # reading the buses alone left open8's sixty-four register file bits
+        # out and scored them as words of one apiece.
+        seen = dict(spoken)
         for word, bits in regs:
             for index, bit in enumerate(bits):
                 seen[bit] = "%s[%d]" % (word, index)
