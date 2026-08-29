@@ -2644,24 +2644,26 @@ def main(netlist, regions_path, outdir, out=None):
     paths = lift_datapaths(netlist, regions, workdir, set(cones) | said, regs)
     selects = lift_selects(netlist, regions, workdir,
                            set(cones) | set(paths) | said, regs)
-    # What a word is loaded with is proved against the logic alone, and the
-    # register that word belongs to already writes its own next state under
-    # its own enable and reset. Writing the proof back as well would drive
-    # those nets twice, so it is reported and not yet emitted.
-    # A load proved as a form is written back: nothing else drives those nets,
-    # since the register it feeds did not lift and a proved region's cells are
-    # dropped from the transcription. A load proved as a *case* is not, for
-    # the reason a case cannot be emitted anywhere: it settles with `=`, so
-    # `split()` reads the block as defining no register, swallows the drivers
-    # of the nets its arms read and exports none of them. warmup survives it
-    # only by being too small to section; the counter does not.
+    # A load is written back now, which it was not: the counter broke when
+    # one was, and that was the same folded-net fault that stopped
+    # hd_8b10b's tables — a net the block named was folded into the line
+    # reading it and the block then named nothing.
+    #
+    # A bank is the exception and stays held. Its template already writes
+    # `q <= d` and wires every bit of `d` itself, so a form written beside
+    # it drives those nets twice: mroblesh comes back NOT EQUIVALENT, which
+    # is a disproof and not a timeout. A chain or a counter that reached
+    # here did not lift at all, so nothing else is speaking for its nets.
     loads = {r["output"] for r in regions if r.get("outputs")}
-    held = {name: hit for name, hit in selects.items() if name in loads}
-    selects = {n: h for n, h in selects.items() if n not in loads}
+    banks_ = {name for name in loads if name.startswith("bank")}
+    held = {name: hit for name, hit in
+            list(paths.items()) + list(selects.items()) if name in banks_}
+    paths = {n: h for n, h in paths.items() if n not in banks_}
+    selects = {n: h for n, h in selects.items() if n not in banks_}
     if held:
-        print("  %d loads proved as a case and not written back: %s"
+        print("  %d bank loads proved and not written back: %s"
               % (len(held), ", ".join(sorted(held))))
-    got = sorted(set(paths) & loads)
+    got = sorted((set(paths) | set(selects)) & loads)
     if got:
         print("  %d loads written back: %s" % (len(got), ", ".join(got)))
     roles.update(realign(module, module["ports"], chains, states, banks,
