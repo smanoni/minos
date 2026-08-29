@@ -247,6 +247,12 @@ lec-lifted:
 	done; \
 	echo "  $(DESIGN): no answer, which is not a pass"
 
+.PHONY: sources
+sources: | $(WORKDIR)
+	$(PYTHON) $(SCRIPTS)/sources.py tt09 $(WORKDIR)/sources \
+		`ls $(WORKDIR)/*_lifted.sv 2>/dev/null | xargs -n1 basename \
+		 | sed 's/_lifted.sv//' | grep '^tt_um' | tr '\n' ' '`
+
 .PHONY: score
 score:
 	@$(PYTHON) $(SCRIPTS)/score.py $(WORKDIR)/$(DESIGN).v \
