@@ -61,6 +61,12 @@ def recovered(words, cells):
     """
     out, at = {}, 0
     for flop, where in words.items():
+        # A word is what the RTL declares, an array included. Scored by entry
+        # instead, open8's register file becomes eight words where its author
+        # wrote one and the two stop agreeing about something they agree on;
+        # scored this way a real disagreement — des declaring one array where
+        # its author wrote sixteen registers — is left visible, which is what
+        # a metric is for.
         out[flop] = where.split("[")[0]
     for flop in cells:
         if flop not in out:

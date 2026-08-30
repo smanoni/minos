@@ -2639,6 +2639,17 @@ def main(netlist, regions_path, outdir, out=None):
         for word, bits in regs:
             for index, bit in enumerate(bits):
                 seen[bit] = "%s[%d]" % (word, index)
+        # A family read across the datapath is declared as an array and every
+        # chain in it is one bit of a stage, so the word a register belongs to
+        # is the stage and not the chain it was found in. Without this des
+        # records 48 chains of 16 under names its own RTL never uses, and is
+        # scored on a grouping it did not emit.
+        for index, (prefix, slot) in seat.items():
+            for depth, flop in enumerate(chains[index]["flops"]):
+                cell = module["cells"].get(flop)
+                if cell and match.FLOP in cell["type"]:
+                    seen[cell["connections"]["Q"][0]] = \
+                        "%sq[%d][%d]" % (prefix, depth, slot)
         holds = {}
         for name, cell in module["cells"].items():
             if match.FLOP not in cell["type"]:
