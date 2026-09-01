@@ -432,6 +432,75 @@ def net_names(module):
             for bit, names in out.items()}
 
 
+def cone_of(cells, driver, ports, bits, stop=()):
+    """The combinational cells computing these bits, stopping at a register.
+
+    A cone also stops at a net it was told is an operand. Without that it
+    swallows whatever computes one — an accumulator added to a product takes
+    the multiplier in with it — and what is offered for proof is not the form
+    it was drawn for.
+    """
+    inside, seen, queue = set(), set(stop), list(bits)
+    while queue:
+        bit = queue.pop()
+        if bit in seen:
+            continue
+        seen.add(bit)
+        src = driver.get(bit)
+        if src is None or is_flop(cells, src) or src in inside:
+            continue
+        inside.add(src)
+        queue += [b for port, conn in cells[src]["connections"].items()
+                  for b in conn
+                  if cells[src]["port_directions"].get(port) == "input"]
+    return sorted(inside)
+
+
+def cut_at(cells, driver, ports, name, bits, operand):
+    """A region drawn round some bits and cut at a word it is built from.
+
+    The wall M5 stands at is an operand that is itself an expression: a cone
+    reads a word the design computes elsewhere in the same cone, and no form
+    can be written against a net that has no name outside it. Cutting there
+    turns that word into a boundary, so it crosses as an input and can be
+    named, and the outer form is asked of what remains.
+
+    The names are the cut's own. A net synthesis left called `$abc$...$n448`
+    cannot become a port, yosys promoting no name that begins with a dollar,
+    so every net the region is drawn around is given one here.
+    """
+    every = list(bits) + list(operand)
+    if len(set(every)) != len(every):
+        return None
+    inside = cone_of(cells, driver, ports, bits, operand)
+    if not inside or any(driver.get(bit) not in inside for bit in bits):
+        return None
+    # The word has to be one this cone computes, or cutting at it changes
+    # nothing. Asked of the cut cone the question answers itself — it stops
+    # at those bits, so nothing drives them there — so it is asked of the
+    # cone as it stands uncut.
+    if operand:
+        whole = set(cone_of(cells, driver, ports, bits))
+        if not any(driver.get(bit) in whole for bit in operand):
+            return None
+    srcs, inputs = set(), set()
+    for cell in inside:
+        for port, conn in cells[cell]["connections"].items():
+            if cells[cell]["port_directions"].get(port) != "input":
+                continue
+            for bit in conn:
+                src = driver.get(bit)
+                if src is None:
+                    inputs.add(ports.get(bit, str(bit)))
+                elif is_flop(cells, src):
+                    srcs.add(src)
+    spelt = ["minos_net_%d" % every.index(bit) for bit in bits]
+    return {"kind": "cone", "output": name, "outputs": spelt, "bits": spelt,
+            "cells": inside, "registers": sorted(srcs),
+            "inputs": sorted(inputs), "expose": every,
+            "operand_slots": [every.index(bit) for bit in operand]}
+
+
 def load_cones(cells, driver, ports, groups, names):
     """The logic a word of registers is loaded from, cut away from the word.
 
@@ -560,9 +629,29 @@ def main(path, out=None):
                         "cells": group + cone_cells(cells, driver, ports, group),
                         "registers": group, "inputs": list(ctrl)})
 
+    # Registers no detector claimed are still registers, and the logic that
+    # loads them is still logic. Left out they take the design with them:
+    # db_MAC keeps sixteen of its thirty two flops loose and three per cent
+    # of its cells inside any region, so its multiply and accumulate is never
+    # offered to anything. Grouped by what clocks them, they get a cone at
+    # their input like every other word.
+    print("  loose registers:")
+    claimed = {f for r in regions for f in r.get("registers", [])}
+    loose = collections.defaultdict(list)
+    for name in cells:
+        if is_flop(cells, name) and name not in claimed:
+            loose[control(cells, ports, driver, name)].append(name)
+    for ctrl, group in sorted(loose.items(), key=lambda g: (-len(g[1]), str(g[0]))):
+        if len(group) < 2:
+            continue
+        print("    %2d wide on %s" % (len(group), " ".join(ctrl)))
+        regions.append({"kind": "loose", "width": len(group),
+                        "cells": sorted(group), "registers": sorted(group),
+                        "inputs": list(ctrl)})
+
     print("  load cones:")
     groups = [(r["kind"], i, r["registers"]) for i, r in enumerate(regions)
-              if r["kind"] in ("chain", "bank", "state")]
+              if r["kind"] in ("chain", "bank", "state", "loose")]
     for region in load_cones(cells, driver, ports, groups, names):
         print("    %-14s %2d wide, %d registers, %d ports, %d cells"
               % (region["output"], len(region["bits"]),

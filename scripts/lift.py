@@ -1782,9 +1782,61 @@ def lift_selects(netlist, regions, workdir, done, regs=()):
     return found
 
 
-def lift_datapaths(netlist, regions, workdir, done, regs=()):
+def port_bits(module, spelt):
+    """The netlist bit each of a region's own bit names stands for.
+
+    A load cone's result is internal nets and not ports, so looking only at
+    the ports resolves nothing and the cone is passed over in silence: that
+    is every cone drawn at a register's input, which is most of them.
+    """
+    where = dict(module.get("ports", {}))
+    for name, spec in module.get("netnames", {}).items():
+        where.setdefault(name, spec)
+    out = []
+    for one in spelt:
+        got = re.match(r"^(.*?)(?:\[(\d+)\])?$", one)
+        base, at = got.group(1), int(got.group(2) or 0)
+        if base in where and at < len(where[base]["bits"]):
+            out.append(where[base]["bits"][at])
+    return out if len(out) == len(spelt) else []
+
+
+def cut_forms(netlist, region, index, workdir, words, cells, drive, ports,
+              module):
+    """A refusing cone tried again, cut at a word it computes for itself.
+
+    This is the wall M5 stands at: a cone reads a word the design works out
+    inside the same cone, and no form can be written against a net that has
+    no name beyond it. `db_MAC` adds an accumulator to a product, `open8`
+    muxes its sources and then adds. Cutting at the word turns it into a
+    boundary — it crosses as an input, so it can be named — and the form is
+    asked of what is left.
+    """
+    ybits = port_bits(module, region.get("bits", []))
+    if not ybits:
+        return None
+    for at, (name, bits) in enumerate(sorted(words.items())):
+        cut = structure.cut_at(cells, drive, ports, region["output"], ybits, bits)
+        if not cut:
+            continue
+        got = match.extract(netlist, cut, 9000 + index * 40 + at, workdir)
+        if not got:
+            continue
+        path, inner = got
+        ins = port_buses(path, inner, "input")
+        outs = port_buses(path, inner, "output")
+        have = {port for one in ins.values() for port in one}
+        y = output_bus(cut, outs)
+        want = ["minos_net_%d" % slot for slot in cut["operand_slots"]]
+        if y is None or not set(want) <= have:
+            continue
+        yield name, path, inner, ins, y, want
+
+
+def lift_datapaths(netlist, regions, workdir, done, regs=(), cut_words=None):
     """An arithmetic form for every output bus that proves equivalent"""
     top = list(json.load(open(netlist))["modules"].values())[0]
+    cells_, drive_, _, ports_ = structure.load(netlist)
     found = {}
     for index, region in enumerate(regions):
         if region["kind"] != "cone" or region["output"] in done:
@@ -1820,11 +1872,54 @@ def lift_datapaths(netlist, regions, workdir, done, regs=()):
             print("  cone %-12s %s of %s and %s"
                   % (region["output"], hit["label"],
                      slice_of(hit["a"]), slice_of(hit["b"])))
+        elif hit and hit.get("cut"):
+            pass
         elif hit:
             print("  cone %-12s %-14s %s"
                   % (region["output"], hit["label"],
                      re.sub(r"\ba\b", slice_of(hit["a"]), hit["form"])))
-        else:
+        # Refused against every operand it could name, the cone is tried once
+        # more cut at a word it computes for itself. What it could not say as
+        # one form it may say as a form of two.
+        if not hit and cut_words:
+            for name, path2, inner, ins2, y2, want in cut_forms(
+                    netlist, region, index, workdir, cut_words, cells_, drive_,
+                    ports_, top):
+                rest2 = sorted(p for one in ins2.values() for p in one
+                               if p not in set(want))
+                for other in sorted(ins2):
+                    a = ins2[other]
+                    if len(a) != len(y2) or set(a) & set(want):
+                        continue
+                    wrap = "%s/cut_%d_wrap.v" % (workdir, index)
+                    open(wrap, "w").write(
+                        datapath_wrapper("gold", inner, a, want,
+                                         sorted(set(rest2) - set(a)), y2))
+                    gold = "%s/cut_%d_gold.json" % (workdir, index)
+                    code, log = match.yosys(
+                        ["read_json %s" % path2, "read_verilog %s" % wrap,
+                         "hierarchy -top gold", "flatten", "opt_clean",
+                         "write_json %s" % gold],
+                        "%s/cut_%d.ys" % (workdir, index))
+                    if code:
+                        continue
+                    for label, op in DATAPATH_OPS:
+                        if prove_candidate(
+                                datapath_candidate(op, len(a), len(want),
+                                                   len(rest2), len(y2)),
+                                gold, workdir, "cut_%d" % index) \
+                                == "PROVEN EQUIVALENT":
+                            hit = {"label": "%s with %s" % (label, name),
+                                   "op": op, "a": a, "b": want, "y": y2,
+                                   "cut": name}
+                            break
+                    if hit:
+                        break
+                if hit:
+                    print("  cone %-12s %s, cut at %s"
+                          % (region["output"], hit["label"], name))
+                    break
+        if not hit:
             print("  cone %-12s no arithmetic form" % region["output"])
         if hit:
             found[region["output"]] = hit
@@ -2674,7 +2769,9 @@ def main(netlist, regions_path, outdir, out=None):
     said = {"chain%d_d" % index for index in chains}
     said |= {"state%d_d" % index for index in states}
     cones = lift_cones(netlist, regions, workdir)
-    paths = lift_datapaths(netlist, regions, workdir, set(cones) | said, regs)
+    paths = lift_datapaths(netlist, regions, workdir, set(cones) | said, regs,
+                           {n: b for n, b in made.items()
+                            if n.startswith("bus")})
     selects = lift_selects(netlist, regions, workdir,
                            set(cones) | set(paths) | said, regs)
     # A load is written back now, which it was not: the counter broke when

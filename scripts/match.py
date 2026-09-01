@@ -77,6 +77,13 @@ def extract(netlist, region, index, workdir, expose=False):
     top = list(design["modules"])[0].lstrip("\\")
     for cell in region["cells"]:
         module["cells"][cell].setdefault("attributes", {})["minos_region"] = "y"
+    # A net synthesis left with only a private name cannot become a port: a
+    # cut promotes a net under the name it carries and yosys carries no name
+    # that begins with a dollar. The nets a region was drawn around are given
+    # a public one here so the cut can hand them over.
+    for slot, bit in enumerate(region.get("expose", [])):
+        module.setdefault("netnames", {})["minos_net_%d" % slot] = {
+            "hide_name": 0, "bits": [bit], "attributes": {}}
     tagged = "%s/region_%d_tagged.json" % (workdir, index)
     json.dump(design, open(tagged, "w"))
 
