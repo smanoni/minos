@@ -1887,8 +1887,13 @@ def lift_datapaths(netlist, regions, workdir, done, regs=(), cut_words=None):
                     ports_, top):
                 rest2 = sorted(p for one in ins2.values() for p in one
                                if p not in set(want))
-                for other in sorted(ins2):
-                    a = ins2[other]
+                # The words a cut region may be read against, not its raw
+                # port bases. An accumulator is a register and its bits cross
+                # the cut one port apiece, so read as bases it is sixteen
+                # operands of one bit and never the word it is.
+                named2, _ = read_buses(top, top["ports"], ins2, regs)
+                for other in sorted(named2):
+                    a = named2[other]
                     # The same width rule the uncut path uses. Demanding the
                     # operand be as wide as the result refuses a product
                     # outright, whose halves are half of it — which is the
@@ -2773,9 +2778,13 @@ def main(netlist, regions_path, outdir, out=None):
     said = {"chain%d_d" % index for index in chains}
     said |= {"state%d_d" % index for index in states}
     cones = lift_cones(netlist, regions, workdir)
+    # Cut at the whole word, not the part of it left after naming. A bit a
+    # seed word already holds is stripped so nothing is named twice, which is
+    # right for a name and wrong for a boundary: db_MAC's words are eight bits
+    # and the cone was being offered five of them.
     paths = lift_datapaths(netlist, regions, workdir, set(cones) | said, regs,
-                           {n: b for n, b in made.items()
-                            if n.startswith("bus")})
+                           {n: b for n, b in grown.items()
+                            if n.startswith(("bus", "add"))})
     selects = lift_selects(netlist, regions, workdir,
                            set(cones) | set(paths) | said, regs)
     # A load is written back now, which it was not: the counter broke when
