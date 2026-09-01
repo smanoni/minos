@@ -1889,7 +1889,11 @@ def lift_datapaths(netlist, regions, workdir, done, regs=(), cut_words=None):
                                if p not in set(want))
                 for other in sorted(ins2):
                     a = ins2[other]
-                    if len(a) != len(y2) or set(a) & set(want):
+                    # The same width rule the uncut path uses. Demanding the
+                    # operand be as wide as the result refuses a product
+                    # outright, whose halves are half of it — which is the
+                    # shape a multiply and accumulate is made of.
+                    if set(a) & set(want) or not plausible(a, want, y2):
                         continue
                     wrap = "%s/cut_%d_wrap.v" % (workdir, index)
                     open(wrap, "w").write(
