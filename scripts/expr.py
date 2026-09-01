@@ -951,6 +951,12 @@ def made(lines):
         if got:
             return got.group(1)
     for line in lines:
+        # A word taken all at once is assigned as a concatenation. Read as
+        # `assign\s+(\w+)` the brace matches nothing and the piece is keyed on
+        # no name at all, so `split()` exports none of what it drives.
+        got = re.match(r"^\s*assign\s+\{\s*(\w+)", line)
+        if got:
+            return got.group(1)
         got = re.match(r"^\s*assign\s+(\w+)", line)
         if got:
             return got.group(1)
