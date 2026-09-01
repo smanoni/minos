@@ -840,6 +840,13 @@ def split(defs, blocks, proven, keep, wires, wide, top, ports=()):
                 got = DECL.match(line)
                 if got:
                     drives.add(got.group(3))
+                # A word assigned as a concatenation drives every name in it,
+                # not only the one the piece is keyed on. Counted as one, the
+                # rest are exported from nowhere and read from a section that
+                # never declared them.
+                got = re.match(r"^\s*assign\s+\{([^}]*)\}\s*=", line)
+                if got:
+                    drives |= set(BASE.findall(got.group(1)))
         length = sum(len(items[at]) for at in group)
         if length < PIECE:
             continue
