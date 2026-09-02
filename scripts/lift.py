@@ -1772,15 +1772,13 @@ def lift_selects(netlist, regions, workdir, done, regs=(), spoken=None):
         # a lookup and have no regularity for a word to be recovered from —
         # ten per cent of its nets are seated, the corpus's lowest. Offered
         # last, so a word's name always wins where there is one.
-        driven = driver_map(top)
+        # Whatever a word has not already claimed is written down by the
+        # transcription under the name of the bit it is. Excluding registers
+        # outright was too much: one absorbed into a family is spelt above
+        # and one no word claimed is spelt `wNNN` and declared, which is what
+        # a cone selecting on seventeen loose registers needs.
         for bit, one in seat.items():
-            # Only a net some gate drives. A register's output is declared
-            # under the name its word carries — and where a family took that
-            # word, under the array's — so spelling it after its bit gives
-            # `w123`, which the RTL declares nowhere.
-            src = driven.get(bit)
-            if src is not None and match.FLOP not in top["cells"][src]["type"]:
-                speak.setdefault(one, expr.net_name(bit))
+            speak.setdefault(one, expr.net_name(bit))
         wanted = set(control) | {net for one in arms for net, _ in one
                                  if net not in ("0", "1")}
         if any(taken[seats[net]] not in speak for net in wanted):
