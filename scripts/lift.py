@@ -1680,7 +1680,25 @@ def select_candidate(control, arms, seats, width, many):
     return "\n".join(body + ["endmodule", ""])
 
 
-def lift_selects(netlist, regions, workdir, done, regs=()):
+def family_bits(chains, seat):
+    """The name a family gives each register it absorbed.
+
+    A chain read across the datapath is declared as one bit of an array, so
+    its registers answer to `pipe0_q[stage][bit]` and to nothing else. Without
+    this a cone selecting on one of them finds no name for it and is refused,
+    which is what the coverage those registers brought in ran into.
+    """
+    out = {}
+    for index, (prefix, slot) in seat.items():
+        info = chains.get(index)
+        if not info:
+            continue
+        for depth, flop in enumerate(info.get("flops", [])):
+            out[flop] = "%sq[%d][%d]" % (prefix, depth, slot)
+    return out
+
+
+def lift_selects(netlist, regions, workdir, done, regs=(), spoken=None):
     """A case for every cone that turns out to be a selection over a few nets.
 
     A cone whose bits all stand on the same handful of nets, and which each
@@ -1745,6 +1763,9 @@ def lift_selects(netlist, regions, workdir, done, regs=()):
         for bit, one in seat.items():
             if bit in spelling:
                 speak.setdefault(one, spelling[bit])
+        for bit, one in seat.items():
+            if bit in (spoken or {}):
+                speak.setdefault(one, spoken[bit])
         # A net no word claims is still written down: the transcription calls
         # an internal net after the bit it is, and that name is as real as any
         # other. Refusing it cost hd_8b10b both its encoder tables, which are
@@ -2799,8 +2820,14 @@ def main(netlist, regions_path, outdir, out=None):
     paths = lift_datapaths(netlist, regions, workdir, set(cones) | said, regs,
                            {n: b for n, b in grown.items()
                             if n.startswith(("bus", "add"))})
+    kin = family_bits(chains, seat)
+    spoken_bits = {}
+    for flop, name in kin.items():
+        cell = module["cells"].get(flop)
+        if cell and match.FLOP in cell["type"]:
+            spoken_bits[cell["connections"]["Q"][0]] = name
     selects = lift_selects(netlist, regions, workdir,
-                           set(cones) | set(paths) | said, regs)
+                           set(cones) | set(paths) | said, regs, spoken_bits)
     # A load is written back now, which it was not: the counter broke when
     # one was, and that was the same folded-net fault that stopped
     # hd_8b10b's tables — a net the block named was folded into the line
