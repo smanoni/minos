@@ -1751,8 +1751,15 @@ def lift_selects(netlist, regions, workdir, done, regs=()):
         # a lookup and have no regularity for a word to be recovered from —
         # ten per cent of its nets are seated, the corpus's lowest. Offered
         # last, so a word's name always wins where there is one.
+        driven = driver_map(top)
         for bit, one in seat.items():
-            speak.setdefault(one, expr.net_name(bit))
+            # Only a net some gate drives. A register's output is declared
+            # under the name its word carries — and where a family took that
+            # word, under the array's — so spelling it after its bit gives
+            # `w123`, which the RTL declares nowhere.
+            src = driven.get(bit)
+            if src is not None and match.FLOP not in top["cells"][src]["type"]:
+                speak.setdefault(one, expr.net_name(bit))
         wanted = set(control) | {net for one in arms for net, _ in one
                                  if net not in ("0", "1")}
         if any(taken[seats[net]] not in speak for net in wanted):
@@ -2715,6 +2722,13 @@ def main(netlist, regions_path, outdir, out=None):
     start.update(buses.seeds(module_, regions))
     start.update(buses.adders(netlist, workdir))
     grown, _ = buses.propagate(module_, driver_, start)
+    # A chain read across the datapath is declared as one bit of its family's
+    # array and never under its own name, so offering that name to a cone
+    # spells a net `r0_q[0]` which the RTL declares nowhere. The declaration
+    # adds the `_q`, so that is what has to be matched: comparing the bare
+    # name catches nothing, which is how this was missed once already.
+    gone = {"%s_q" % names[index] for index in seat if index in names}
+    regs = [(name, bits) for name, bits in regs if name not in gone]
     have = {name for name, _ in regs}
     # Only the words this pass made, and only where they are its own: a bit
     # a seed word already holds belongs to the port or register it came

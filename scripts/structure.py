@@ -630,15 +630,22 @@ def main(path, out=None):
                         "registers": group, "inputs": list(ctrl)})
 
     # Registers no detector claimed are still registers, and the logic that
-    # loads them is still logic: leaving them out puts 43% of the corpus in no
+    # loads them is still logic: left out they put 43% of the corpus in no
     # region at all, db_MAC keeping three per cent of its cells inside one.
-    # Giving them a region reaches 99% and breaks kwr_lfsr, whose new load
-    # cone proves as a case whose arms name a register from another region —
-    # and `split()` moves that case into a section without exporting it, so
-    # the design comes back NOT EQUIVALENT and will not bind. The coverage is
-    # worth having and cannot be taken until a section exports what a proven
-    # case reads. Held here rather than in the emitter so that nothing else
-    # depends on it in the meantime.
+    print("  loose registers:")
+    claimed = {f for r in regions for f in r.get("registers", [])}
+    loose = collections.defaultdict(list)
+    for name in cells:
+        if is_flop(cells, name) and name not in claimed:
+            loose[control(cells, ports, driver, name)].append(name)
+    for ctrl, group in sorted(loose.items(), key=lambda g: (-len(g[1]), str(g[0]))):
+        if len(group) < 2:
+            continue
+        print("    %2d wide on %s" % (len(group), " ".join(ctrl)))
+        regions.append({"kind": "loose", "width": len(group),
+                        "cells": sorted(group), "registers": sorted(group),
+                        "inputs": list(ctrl)})
+
     print("  load cones:")
     groups = [(r["kind"], i, r["registers"]) for i, r in enumerate(regions)
               if r["kind"] in ("chain", "bank", "state", "loose")]
