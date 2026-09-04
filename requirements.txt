@@ -1,0 +1,2 @@
+# Everything the Python scripts import beyond the standard library.
+klayout==0.30.10

@@ -8,5 +8,5 @@ abc.history
 .venv
 gds/*
 !gds/.gitkeep
-docs
+docs/def-gaps.md
 test

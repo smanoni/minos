@@ -1,64 +1,66 @@
+<div align="center">
+
+  <img src="docs/img/minos_logo.png" alt="minos logo" width="280">
+
 # minos
 
-GDS to RTL with open tools.
+**A silicon decompiler**
 
-**Under active development. Not ready for use.**
+</div>
 
-| path | what |
-| --- | --- |
-| `scripts/gds2def.py` | GDS + PDK to DEF: placement and connectivity |
-| `scripts/def2v.py` | DEF to gate-level Verilog |
-| `scripts/generic.ys` | PDK netlist to technology-independent gates |
-| `scripts/gen_layer_props.py` | KLayout layer properties |
-| `scripts/structure.py` | candidate regions in a recovered netlist |
-| `scripts/match.py` | proves a region equivalent to a reference |
-| `scripts/cc_lib.ys` | common_cells reference to the same gate basis |
-| `scripts/lift.py` | behavioural RTL for a region, kept only if proven |
-| `scripts/emit.py` | rebuilds the hierarchy synthesis flattened |
-| `scripts/cosim.py` | simulates the recovered RTL beside the netlist |
-| `scripts/observe.py` | names a register from what it is watched doing |
-| `scripts/infer.py` | asks a model what a net looks like it is for |
-| `scripts/nameval.py` | scores a model against the names a run earned |
-| `gds/` | input layouts, populated by `make deps` |
-| `gds.lock` | checksums pinning the downloaded layouts |
-| `work/` | generated output |
+minos reconstructs RTL from the physical layout of a digital circuit. It can be useful for understanding existing silicon, recovering RTL when the original source is unavailable, and checking recovered designs against the gates they came from.
 
-## Naming, and the optional model
+Given a GDS layout and the PDK used to build it, minos extracts the circuit, identifies its structure, and attempts to recover an equivalent SystemVerilog description. The output is intended to describe the design at the RTL level: registers, buses, arithmetic, and control flow, rather than a gate-level netlist.
 
-A layout carries no names out of the foundry, so every name in the recovered
-RTL is one the flow worked out. Three things give one, in order of what they
-are worth: a port, which came in with the layout; a run, which watched the
-design and can say a register counts or shifts or only ever gains bits; and
-the shape a row of registers steps in, which says what it was for.
+Every transformation is checked for equivalence against the extracted circuit. If minos cannot prove that a proposed RTL representation implements the same logic, it does not emit that representation.
 
-Whatever is still a number after that can be guessed at by a local model, off
-by default because the flow has to work without one:
+The project started with the [Jane Street ASIC puzzle 2026](https://github.com/janestreet/asic-puzzle-2026), which provides a layout and asks the solver to determine what it computes.
 
-    make lift DESIGN=<name> MINOS_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
+<div align="center">
 
-It answers from a fixed list of words and never writes prose, it is shown the
-logic with the design's own name held back, and it is offered only the nets
-nothing else has named. Every name it gives is marked
-`// inferred, unverified` where the net is declared and counted at the top of
-the module, because a guess that reads like a measurement is worse than a
-number. Point `MINOS_MODEL_HOST` at anything speaking the ollama API.
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-Registers and combinational nets get separate lists, being separate questions:
-a wire is never a shifter and a register is never a clock. A design has around
-ten times as many nameless wires as registers and asking about all of them
-would take longer than the rest of the flow, so the ones asked about are the
-ones a reader carries furthest — `MINOS_NAMES` sets how many, 24 by default.
-A wire defined three lines above its only reader costs nothing to hold, and a
-name would only lengthen the line.
+[Getting started](docs/getting-started.md) •
+[Against a C decompiler](#against-a-c-decompiler) •
+[License](#license)
 
-Both lists are short, and shorter than they were: every word on them earned
-its place by being an answer some net actually came back as. `MINOS_AHEAD=1`
-puts a question a second time showing what a net feeds where asking what it is
-built from gave nothing; it is off because on this corpus it turned one
-unknown into a name out of some four hundred and forty asked, for twice the
-running time.
+</div>
 
-`scripts/nameval.py` is why 7B and not smaller: it hides the names a run
-earned, asks the model for them back, and scores what comes out.
+> **Under active development.** Interfaces, supported designs, and output quality are still changing.
 
-    MINOS_MODEL=<model> python3 scripts/nameval.py work
+## Against a C decompiler
+
+A C decompiler reconstructs a higher-level program from a compiled binary. minos performs a similar reconstruction on a digital circuit, but the available information and the guarantees are different.
+
+|                  | C decompiler                       | minos                                                |
+| ---------------- | ---------------------------------- | ---------------------------------------------------- |
+| Input            | Stripped binary                    | GDS layout and PDK                                   |
+| Information lost | Symbols, types, source structure   | Names, hierarchy, RTL structure                      |
+| Recovered        | Functions, variables, control flow | Modules, registers, buses, arithmetic, control flow  |
+| Names            | Usually invented                   | Invented, or recovered from observed behavior        |
+| Correctness      | Best effort                        | Proposed representations are checked for equivalence |
+
+The distinction is the last row. A software decompiler generally has to choose a plausible interpretation of the binary and leave validation to the user. minos can instead check each proposed representation against the finite-state circuit it came from.
+
+This does not make the reconstruction problem easy. It makes it possible to separate what has been recovered from what has merely been guessed.
+
+When minos cannot prove a higher-level representation, it leaves the corresponding logic at a lower level. In particular, recovering control flow remains one of the more difficult parts of the process.
+
+## Getting started
+
+See [docs/getting-started.md](docs/getting-started.md) for the complete workflow, including the individual stages, how to run them, and the layout of the repository.
+
+To fetch the dependencies and prepare the example designs:
+
+```bash
+make deps
+make warmup
+```
+
+The warmup design includes a ground-truth implementation that can be used to compare the recovered RTL against the original.
+
+## License
+
+minos is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+
+The layouts under `gds/` and the submodules under `deps/` retain the licenses of their respective projects.
