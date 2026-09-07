@@ -2092,20 +2092,24 @@ def instance(hit, reg, role):
     the module is named rather than written out. What the reference offers and
     the design never drove is tied off, exactly as it was tied off to prove it.
     """
+    # Everything downstream spells a register's output `<name>_q`, the
+    # declaration being what settles it, so the wire the template drives has
+    # to carry the suffix too or every reader binds to nothing.
+    word = "%s_q" % reg
     args = []
     for port in sorted(hit["wired"]):
         slot = hit["wired"][port]
         if slot == "":
             args.append(".%s()" % port)
         elif slot == "q":
-            args.append(".%s(%s)" % (port, reg))
+            args.append(".%s(%s)" % (port, word))
         elif slot.startswith("c[") and slot.endswith("]"):
             args.append(".%s(%s)" % (port, role.get("c" + slot[2:-1], "1'b1")))
         else:
             args.append(".%s(%s)" % (port, role.get(slot, slot)))
     head = "  %s #(.%s(%d)) u_%s (" % (hit["module"], hit["param"],
                                        hit["value"], reg)
-    return ["  wire [%d:0] %s;" % (hit["width"] - 1, reg), head] + \
+    return ["  wire [%d:0] %s;" % (hit["width"] - 1, word), head] + \
         ["      %s%s" % (a, "," if at < len(args) - 1 else "")
          for at, a in enumerate(args)] + ["  );"]
 
