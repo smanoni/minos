@@ -44,6 +44,24 @@ The distinction is the last row. A software decompiler generally has to choose a
 
 This does not make the reconstruction problem easy. It makes it possible to separate what has been recovered from what has merely been guessed.
 
+### Stage by stage
+
+Both tools climb the same ladder. Status is on one scale: Complete, Validated (the output carries a proof or an exact check against ground truth), Partial, Limited, Preliminary. Figures are measured over the twenty one designs in `work/`.
+
+| Stage           | C decompiler                  | minos                                 | Status                               |
+| --------------- | ----------------------------- | ------------------------------------- | ------------------------------------ |
+| Read            | Bytes in an ELF               | Polygons in a GDS                     | Complete, 21 of 21 layouts           |
+| Decode          | Disassembly, using the ISA    | Geometry to placed cells, using the PDK | Validated against the one reference DEF |
+| Primitives      | Instructions                  | Cells, with a Liberty function each   | Complete                             |
+| Normalise       | Lift to an IR                 | Technology mapped to generic gates    | Complete                             |
+| Aggregates      | Variables and types           | Which bits form one word              | Partial, 94% of register bits        |
+| Units           | Functions, from the ABI       | Sections, from net locality           | Preliminary, no ground truth         |
+| Known code      | Library signatures            | Match against `common_cells`          | Limited, 1 design of 21              |
+| Control         | CFG to `if` and `while`       | FSM to `case`                         | Preliminary, 8 cases in 6 designs    |
+| Emit            | C, unverified                 | SystemVerilog, proven                 | Validated, 14 of 21 with no bound    |
+
+The two Preliminary rows are the places a C decompiler leans on conventions that hardware does not have. A binary has a calling convention that marks where a function starts, and a program counter that gives control flow a shape to recover. Synthesis leaves no residue of a module boundary, and a netlist has no program order at all, so control flow becomes an FSM steering multiplexers.
+
 When minos cannot prove a higher-level representation, it leaves the corresponding logic at a lower level. In particular, recovering control flow remains one of the more difficult parts of the process.
 
 ## Getting started
