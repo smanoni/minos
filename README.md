@@ -32,20 +32,6 @@ The project started with the [Jane Street ASIC puzzle 2026](https://github.com/j
 
 A C decompiler reconstructs a higher-level program from a compiled binary. minos performs a similar reconstruction on a digital circuit, but the available information and the guarantees are different.
 
-|                  | C decompiler                       | minos                                                |
-| ---------------- | ---------------------------------- | ---------------------------------------------------- |
-| Input            | Stripped binary                    | GDS layout and PDK                                   |
-| Information lost | Symbols, types, source structure   | Names, hierarchy, RTL structure                      |
-| Recovered        | Functions, variables, control flow | Modules, registers, buses, arithmetic, control flow  |
-| Names            | Usually invented                   | Invented, or recovered from observed behavior        |
-| Correctness      | Best effort                        | Proposed representations are checked for equivalence |
-
-The distinction is the last row. A software decompiler generally has to choose a plausible interpretation of the binary and leave validation to the user. minos can instead check each proposed representation against the finite-state circuit it came from.
-
-This does not make the reconstruction problem easy. It makes it possible to separate what has been recovered from what has merely been guessed.
-
-### Stage by stage
-
 Both tools climb the same ladder. Status is on one scale: Complete, Validated (the output carries a proof or an exact check against ground truth), Partial, Limited, Preliminary. Figures are measured over the twenty one designs in `work/`.
 
 | Stage           | C decompiler                  | minos                                 | Status                               |
@@ -59,6 +45,8 @@ Both tools climb the same ladder. Status is on one scale: Complete, Validated (t
 | Known code      | Library signatures            | Match against `common_cells`          | Limited, 1 design of 21              |
 | Control         | CFG to `if` and `while`       | FSM to `case`                         | Preliminary, 8 cases in 6 designs    |
 | Emit            | C, unverified                 | SystemVerilog, proven                 | Validated, 14 of 21 with no bound    |
+
+The distinction is the last row. A software decompiler generally has to choose a plausible interpretation of the binary and leave validation to the user. minos can instead check each proposed representation against the finite-state circuit it came from. This does not make the reconstruction problem easy. It makes it possible to separate what has been recovered from what has merely been guessed.
 
 The two Preliminary rows are the places a C decompiler leans on conventions that hardware does not have. A binary has a calling convention that marks where a function starts, and a program counter that gives control flow a shape to recover. Synthesis leaves no residue of a module boundary, and a netlist has no program order at all, so control flow becomes an FSM steering multiplexers.
 
