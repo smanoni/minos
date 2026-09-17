@@ -91,6 +91,7 @@ $(WORKDIR) $(TMPDIR):
 # so their checksum is recorded in $(GDSLOCK) on first fetch and enforced after.
 deps:
 	@git submodule update --init --recursive
+	@$(MAKE) --no-print-directory pdk
 	@$(MAKE) --no-print-directory gds
 
 gds:
@@ -349,13 +350,21 @@ lyp: | $(WORKDIR)
 view: lyp gds
 	$(KLAYOUT) -l $(WORKDIR)/minos_$(PDK).lyp $(GDSDIR)/puzzle.gds
 
+# Skipped whole once the library every stage reads is already unpacked, so
+# `make deps` can ask for the PDK unconditionally and cost nothing on a tree
+# that has it. The tarballs are kept so a re-extract needs no second download.
 pdk:
-	mkdir -p $(PDK_ROOT)/.download
+	@if test -s $(LIBERTY) && test -d $(STDCELLS)/lef; then \
+		echo "  PDK already in $(PDK_ROOT)"; exit 0; \
+	fi; \
+	mkdir -p $(PDK_ROOT)/.download; \
 	for p in $(PDK_PARTS); do \
 		test -s $(PDK_ROOT)/.download/$$p.tar.zst || \
-			curl -fsSL -o $(PDK_ROOT)/.download/$$p.tar.zst $(PDK_URL)/$$p.tar.zst; \
-		tar --use-compress-program=unzstd -xf $(PDK_ROOT)/.download/$$p.tar.zst -C $(PDK_ROOT); \
-	done
+			$(CURL) -o $(PDK_ROOT)/.download/$$p.tar.zst $(PDK_URL)/$$p.tar.zst || exit 1; \
+		tar --use-compress-program=unzstd -xf $(PDK_ROOT)/.download/$$p.tar.zst \
+			-C $(PDK_ROOT) || exit 1; \
+	done; \
+	echo "  PDK in $(PDK_ROOT)"
 
 clean:
 	rm -rf $(WORKDIR) $(GDSDIR)

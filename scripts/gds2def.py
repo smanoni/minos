@@ -28,7 +28,13 @@ ORIENT = {(0, False): "N", (90, False): "W", (180, False): "S", (270, False): "E
 def read_lef(pdk):
     """Maps each MACRO to its pin directions and cell extent"""
     cells = {}
-    for path in glob.glob(pdk + "/libs.ref/*/lef/*.lef"):
+    # A missing PDK is not an empty one. Without the LEFs every cell extent is
+    # unknown, which puts each instance at the wrong place and only shows up
+    # hundreds of lines later as a placement that will not line up.
+    found = sorted(glob.glob(pdk + "/libs.ref/*/lef/*.lef"))
+    if not found:
+        raise SystemExit("no LEF under %s/libs.ref, run `make pdk`" % pdk)
+    for path in found:
         macro, pin = None, None
         for line in open(path, errors="ignore"):
             t = line.split()
